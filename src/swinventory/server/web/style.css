@@ -1,0 +1,171 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9; --panel: #fff; --text: #1d2330; --muted: #5e677a; --line: #e3e6ec; --control-line: #858fa3;
+  --accent: #2554d8; --on-accent: #fff; --ok: #117856; --warn: #995b00; --err: #c0302f;
+  --ok-bg: #e4f5ee; --warn-bg: #fdf1dc; --err-bg: #fce8e8; --muted-bg: #eceff4; --bar: #cfdcfb;
+}
+/* 글자색/배경 조합은 WCAG AA(4.5:1)를 라이트·다크 모두 넘게 잡았다(tests/ui/test_ui_ux.py 가 렌더된 색으로 검증).
+ * 다크의 주 버튼은 밝은 파랑 위라 흰 글자가 2.47:1 이다 — 그래서 글자색을 --on-accent 토큰으로 분리했다. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12151c; --panel: #1b2029; --text: #e6e9f0; --muted: #98a1b3; --line: #2b3240; --control-line: #6b768c;
+    --accent: #7ea2ff; --on-accent: #0b1020; --ok: #5fd3a4; --warn: #f0b45a; --err: #ff8b88;
+    --ok-bg: #123428; --warn-bg: #3a2c12; --err-bg: #3d1c1c; --muted-bg: #262c38; --bar: #2b3c68;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }   /* display 를 지정한 요소(.more·header 등)에서도 hidden 속성이 통하게 한다 */
+/* 한글은 기본값(normal)에서 음절 사이에서도 줄이 바뀐다(좁은 칸에서 글자가 세로로 쌓임) — 띄어쓰기에서만 줄을 바꾼다.
+ * 긴 영문 토큰은 overflow-wrap 으로 넘침만 막는다(break-word 는 최소 너비(min-content)를 줄이지 않아 표 칸이 토큰 아래로 찌그러지지 않는다). */
+body { margin: 0; background: var(--bg); color: var(--text); word-break: keep-all; overflow-wrap: break-word;
+  font: 14px/1.5 -apple-system, "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+header { display: flex; align-items: center; gap: 16px; padding: 0 24px; background: var(--panel);
+  border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 3; }
+.brand { font-size: 15px; white-space: nowrap; }
+#nav { display: flex; gap: 4px; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
+#nav a { flex: none; padding: 14px 12px; color: var(--muted); text-decoration: none; border-bottom: 2px solid transparent; white-space: nowrap; }
+#nav a[aria-current="page"] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+#role { flex: none; }
+#logout { flex: none; }
+main { max-width: 1440px; margin: 0 auto; padding: 24px; }
+h1 { font-size: 20px; margin: 0 0 16px; overflow-wrap: anywhere; }
+h1:focus { outline: none; }   /* 화면 전환 뒤 보조기기 초점만 옮기는 제목 — 시각 테두리는 필요 없다 */
+h2 { font-size: 15px; margin: 24px 0 8px; }
+a { color: var(--accent); }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+button.danger { color: var(--err); border-color: var(--err); }
+button.link { border: 0; background: none; color: var(--muted); }
+button:disabled { opacity: .5; cursor: not-allowed; }
+input, select, textarea { padding: 6px 10px; border: 1px solid var(--control-line); border-radius: 6px; background: var(--panel); max-width: 100%; }
+input[type=checkbox], input[type=radio] { padding: 0; }
+input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
+input:disabled, select:disabled, textarea:disabled { opacity: .7; cursor: not-allowed; }
+[aria-invalid="true"] { border-color: var(--err); }
+textarea { width: 100%; min-height: 84px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 12px; }
+.toolbar .spacer { flex: 1; }
+.toolbar label { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); max-width: 100%; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 12px; margin-bottom: 8px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; text-decoration: none; color: inherit; display: block; }
+a.card:hover { border-color: var(--accent); }
+.card .label { color: var(--muted); font-size: 12px; }
+.card .value { font-size: 26px; font-weight: 650; }
+.card .sub { color: var(--muted); font-size: 12px; }
+.card.warn .value { color: var(--warn); } .card.err .value { color: var(--err); } .card.ok .value { color: var(--ok); }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; }
+.bars { display: grid; gap: 4px; }
+/* 분포 막대: 눌러서 거를 수 있는 것은 진짜 button(키보드 Tab·Enter·Space)이고, 아닌 것은 같은 모양의 div 다. */
+.bar { display: grid; grid-template-columns: minmax(120px, 280px) 1fr 48px; gap: 10px; align-items: center; width: 100%;
+  margin: 0; padding: 3px 6px; border: 0; border-radius: 6px; background: none; color: inherit; text-align: left; font: inherit; cursor: default; }
+button.bar { cursor: pointer; }
+button.bar:hover { background: var(--bg); }
+button.bar:hover .name, button.bar.active .name { color: var(--accent); }
+button.bar.active { background: var(--bg); box-shadow: inset 3px 0 0 var(--accent); }
+button.bar.active .name { font-weight: 600; }
+.bar .name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
+.bar .track { display: block; background: var(--muted-bg); border-radius: 4px; height: 14px; overflow: hidden; }
+.bar .fill { display: block; background: var(--bar); height: 100%; border-right: 2px solid var(--accent); }
+.bar .n { text-align: right; color: var(--muted); }
+/* 표: 가로 스크롤과 머리글 고정을 같은 컨테이너(.scroll)가 맡는다. sticky 는 가장 가까운 스크롤 조상 기준이라
+ * 페이지(뷰포트)가 아니라 .scroll 안에서만 붙는다 — 그래서 긴 표(.tall)만 높이를 제한해 컨테이너 안에서 세로로 스크롤시킨다. */
+.scroll { overflow: auto; max-width: 100%; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.scroll.tall { max-height: 75vh; }
+table { width: 100%; border-collapse: separate; border-spacing: 0; }
+th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { position: sticky; top: 0; z-index: 1; background: var(--muted-bg); color: var(--muted); font-weight: 600; font-size: 12px; white-space: nowrap; }
+tbody tr:last-child td { border-bottom: 0; }
+th button.sort { display: inline-flex; gap: 4px; align-items: center; padding: 0; border: 0; border-radius: 3px; background: none; color: inherit; font: inherit; white-space: nowrap; cursor: pointer; }
+th button.sort:hover { color: var(--text); }
+th button.sort .arrow { font-size: 10px; opacity: .55; }
+th[aria-sort] button.sort { color: var(--text); }
+th[aria-sort] button.sort .arrow { opacity: 1; }
+/* IP·버전·시리얼은 토큰 중간에서 끊기면 읽을 수 없다 — break-all 대신 break-word(넘칠 때만 끊고 최소 너비는 줄이지 않음). */
+.mono, td.mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
+h1.mono { font-size: 20px; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: var(--muted-bg); color: var(--muted); white-space: nowrap; }
+.badge.ok { background: var(--ok-bg); color: var(--ok); } .badge.warn { background: var(--warn-bg); color: var(--warn); }
+.badge.err { background: var(--err-bg); color: var(--err); }
+a.badge { text-decoration: none; } a.badge:hover { text-decoration: underline; }
+.tag { display: inline-block; margin: 0 4px 2px 0; padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; font-size: 12px; color: var(--muted); white-space: nowrap; }   /* 칩 하나(team=data)는 끊지 않는다 — 줄은 칩 단위로만 바뀐다 */
+.muted { color: var(--muted); }
+.empty { padding: 28px; text-align: center; color: var(--muted); background: var(--panel); border: 1px dashed var(--line); border-radius: 10px; }
+.error { padding: 12px 16px; background: var(--err-bg); color: var(--err); border-radius: 8px; margin-bottom: 12px; }
+.notice { padding: 12px 16px; background: var(--warn-bg); color: var(--warn); border-radius: 8px; margin-bottom: 12px; }
+.notice a { color: inherit; font-weight: 600; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; } @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+dl.kv { display: grid; grid-template-columns: 110px 1fr; gap: 4px 12px; margin: 0; } dl.kv dt { color: var(--muted); } dl.kv dd { margin: 0; word-break: break-all; }
+.login { max-width: 360px; margin: 14vh auto; }
+.login form { display: grid; gap: 10px; } .login input { width: 100%; }
+
+.form { display: grid; grid-template-columns: 160px 1fr; gap: 10px 14px; align-items: center; max-width: 760px; }
+.form label { color: var(--muted); } .form input[type=text], .form input[type=password], .form input[type=number], .form select { width: 100%; }
+.form .full { grid-column: 1 / -1; }
+.hint { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
+.field-error { color: var(--err); font-size: 12px; margin: 4px 0 0; }
+.rules { margin: 10px 0; }
+.rule { display: grid; grid-template-columns: 200px 1fr auto; gap: 8px; margin-bottom: 8px; max-width: 760px; }
+.result-ok { color: var(--ok); } .result-err { color: var(--err); }
+.msg { display: inline-block; }
+.md h2, .md h3, .md h4 { margin: 20px 0 8px; } .md h2 { font-size: 17px; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+.md p { margin: 8px 0; } .md ul, .md ol { margin: 6px 0 6px 20px; padding: 0; } .md li { margin: 2px 0; }
+.md code { background: var(--muted-bg); padding: 1px 5px; border-radius: 4px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; }
+.md pre { background: var(--muted-bg); padding: 10px 12px; border-radius: 8px; overflow-x: auto; } .md pre code { background: none; padding: 0; }
+.md .scroll { margin: 10px 0; } .md hr { border: 0; border-top: 1px solid var(--line); margin: 16px 0; }
+details > summary { cursor: pointer; color: var(--muted); margin: 12px 0 6px; }
+pre.json { background: var(--muted-bg); padding: 12px; border-radius: 8px; overflow: auto; max-height: 420px; font-size: 12px; }
+
+.tab { padding: 6px 12px; border-radius: 6px; text-decoration: none; color: var(--muted); }
+.tab.active { background: var(--muted-bg); color: var(--text); font-weight: 600; }
+.badge.neutral { background: var(--muted-bg); color: var(--text); }
+
+pre.cmd { background: var(--muted-bg); padding: 12px; border-radius: 8px; white-space: pre-wrap; word-break: break-all; font-size: 12.5px; margin: 8px 0; user-select: all; }
+.enroll-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; } @media (max-width: 1000px) { .enroll-grid { grid-template-columns: 1fr; } }
+.enroll-grid .panel h2 { margin: 0 0 6px; font-size: 15px; }
+.pulse { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); margin-right: 6px; animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .pulse { animation: none; } }
+td.nowrap { white-space: nowrap; }
+.nobreak { white-space: nowrap; }   /* 자산번호 링크처럼 중간에서 끊기면 안 되는 토큰만. 칸 전체를 nowrap 으로 두면 옆의 불일치 배지까지 한 줄로 묶여 열이 200px 로 넓어진다 */
+/* 열이 많은 표(호스트 등)에서 auto 레이아웃은 칸을 min-content 까지 줄인다 — OS 이름("Rocky Linux 9.4 (Blue Onyx)")이 66px 칸에서 3~5줄로 쌓여 행이 80~120px 가 됐다.
+ * 줄바꿈은 허용하되 두 줄 안에 들어가는 바닥 너비를 준다(em 이라 글꼴 크기에 비례). 자산번호 칸은 '링크 + 배지 하나'가 첫 줄, 나머지 배지가 둘째 줄이다. */
+td.asset, td.os { min-width: 11em; }
+
+/* 필터 칩(적용 중인 필터를 보여 주고 하나씩 끈다) */
+.chip { display: inline-flex; align-items: center; gap: 2px; padding: 2px 4px 2px 10px; border: 1px solid var(--accent); border-radius: 14px; background: var(--panel); color: var(--text); font-size: 13px; }
+.chip button { padding: 0 6px; border: 0; border-radius: 50%; background: none; color: var(--muted); line-height: 1.3; }
+.chip button:hover { color: var(--err); }
+.more { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 8px; }
+.cmp-table { margin: 4px 0 0; }
+
+/* ---- 좁은 화면(휴대폰) ---- */
+@media (max-width: 640px) {
+  /* 머리글 두 줄: 위 줄(브랜드·역할·로그아웃) / 아래 줄(메뉴는 글자가 쌓이지 않게 한 줄 가로 스크롤) */
+  header { flex-wrap: wrap; gap: 0 8px; padding: 0 12px; }
+  .brand { order: 1; padding: 10px 0; }
+  #role { order: 2; margin-left: auto; }
+  #logout { order: 3; }
+  #nav { order: 4; flex: 1 0 100%; margin: 0 -12px; padding: 0 12px; }
+  #nav a { padding: 10px 12px; }
+  main { padding: 16px 12px; }
+  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .card { padding: 10px 12px; }
+  .card .value { font-size: 22px; }
+  .form, .rule, .enroll-grid, .grid2 { grid-template-columns: 1fr; }
+  .form label { margin-top: 4px; }
+  dl.kv { grid-template-columns: 1fr; gap: 0; }
+  dl.kv dt { margin-top: 8px; font-size: 12px; }
+  .bar { grid-template-columns: minmax(80px, 36%) 1fr 36px; gap: 8px; }
+  /* 칸이 글자 하나 너비로 찌그러지지 않게 표에 열 수에 비례한 최소 너비(table() 가 --cols 를 CSSOM 으로 대입)를 주고, 넘치는 부분은 .scroll 안에서 가로로 스크롤한다 */
+  table { min-width: calc(var(--cols, 4) * 104px); }
+  /* 휴대폰에서는 표 안쪽 세로 스크롤(max-height)이 페이지 스크롤과 겹쳐 손가락이 표 안에 갇힌다 — 높이 제한을 풀고 페이지와 함께 스크롤한다.
+   * 대신 이 폭에서는 머리글 고정이 없다(가로 스크롤 컨테이너 안의 sticky 는 뷰포트에 붙지 않는다). 데스크톱은 그대로다. */
+  .scroll.tall { max-height: none; }
+  .toolbar > input[type=search], .toolbar > input[type=text], .toolbar > input[type=date] { flex: 1 1 100%; }
+  .toolbar > select { flex: 1 1 140px; min-width: 0; }
+  .login { margin: 8vh auto; }
+}
+@media (pointer: coarse) { button, select, input:not([type=checkbox]):not([type=radio]) { min-height: 40px; } }

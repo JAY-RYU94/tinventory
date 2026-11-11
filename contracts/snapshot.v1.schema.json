@@ -1,0 +1,441 @@
+{
+  "$defs": {
+    "ContainerIn": {
+      "properties": {
+        "container_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Container Id",
+          "type": "string"
+        },
+        "created_at": {
+          "default": "",
+          "maxLength": 32,
+          "title": "Created At",
+          "type": "string"
+        },
+        "image": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Image",
+          "type": "string"
+        },
+        "image_digest": {
+          "default": "",
+          "maxLength": 80,
+          "title": "Image Digest",
+          "type": "string"
+        },
+        "image_id": {
+          "default": "",
+          "maxLength": 80,
+          "title": "Image Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "namespace": {
+          "default": "",
+          "maxLength": 255,
+          "title": "Namespace",
+          "type": "string"
+        },
+        "pod": {
+          "default": "",
+          "description": "쿠버네티스 파드(노드의 CRI 라벨에서)",
+          "maxLength": 255,
+          "title": "Pod",
+          "type": "string"
+        },
+        "runtime": {
+          "default": "",
+          "maxLength": 32,
+          "title": "Runtime",
+          "type": "string"
+        },
+        "state": {
+          "default": "unknown",
+          "description": "running | exited | created | paused | unknown",
+          "maxLength": 16,
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "container_id",
+        "name",
+        "image"
+      ],
+      "title": "ContainerIn",
+      "type": "object"
+    },
+    "HardwareIn": {
+      "properties": {
+        "domain": {
+          "default": "",
+          "maxLength": 255,
+          "title": "Domain",
+          "type": "string"
+        },
+        "fqdn": {
+          "default": "",
+          "maxLength": 255,
+          "title": "Fqdn",
+          "type": "string"
+        },
+        "kind": {
+          "default": "unknown",
+          "description": "physical | virtual | container | unknown",
+          "maxLength": 16,
+          "title": "Kind",
+          "type": "string"
+        },
+        "model": {
+          "default": "",
+          "maxLength": 255,
+          "title": "Model",
+          "type": "string"
+        },
+        "serial": {
+          "default": "",
+          "description": "root 가 아니면 읽지 못해 비어 있을 수 있다",
+          "maxLength": 128,
+          "title": "Serial",
+          "type": "string"
+        },
+        "vendor": {
+          "default": "",
+          "maxLength": 255,
+          "title": "Vendor",
+          "type": "string"
+        },
+        "virt": {
+          "default": "",
+          "description": "하이퍼바이저·컨테이너 이름(vmware, kvm, hyperv, docker …)",
+          "maxLength": 64,
+          "title": "Virt",
+          "type": "string"
+        }
+      },
+      "title": "HardwareIn",
+      "type": "object"
+    },
+    "InterfaceIn": {
+      "properties": {
+        "addresses": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 256,
+          "title": "Addresses",
+          "type": "array"
+        },
+        "mac": {
+          "default": "",
+          "maxLength": 17,
+          "title": "Mac",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "state": {
+          "default": "unknown",
+          "maxLength": 16,
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "InterfaceIn",
+      "type": "object"
+    },
+    "K8sIn": {
+      "properties": {
+        "api_server": {
+          "default": "",
+          "description": "표시용. 자격증명이 섞인 주소는 버린다",
+          "maxLength": 255,
+          "title": "Api Server",
+          "type": "string"
+        },
+        "cluster_id": {
+          "default": "",
+          "description": "클러스터 CA 인증서 SHA-256(소문자 hex 64자). 비면 클러스터 미확인",
+          "maxLength": 64,
+          "title": "Cluster Id",
+          "type": "string"
+        },
+        "runtime": {
+          "default": "",
+          "maxLength": 32,
+          "title": "Runtime",
+          "type": "string"
+        },
+        "version": {
+          "default": "",
+          "maxLength": 64,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "title": "K8sIn",
+      "type": "object"
+    },
+    "KernelIn": {
+      "properties": {
+        "installed": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 256,
+          "title": "Installed",
+          "type": "array"
+        },
+        "reboot_required": {
+          "title": "Reboot Required",
+          "type": "boolean"
+        },
+        "running": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Running",
+          "type": "string"
+        }
+      },
+      "required": [
+        "running",
+        "installed",
+        "reboot_required"
+      ],
+      "title": "KernelIn",
+      "type": "object"
+    },
+    "OsIn": {
+      "properties": {
+        "family": {
+          "maxLength": 32,
+          "title": "Family",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 255,
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 64,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "family",
+        "name",
+        "version"
+      ],
+      "title": "OsIn",
+      "type": "object"
+    },
+    "PackageIn": {
+      "properties": {
+        "arch": {
+          "default": "",
+          "maxLength": 32,
+          "title": "Arch",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "source": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Source",
+          "type": "string"
+        },
+        "version": {
+          "default": "",
+          "maxLength": 256,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "name"
+      ],
+      "title": "PackageIn",
+      "type": "object"
+    },
+    "PortIn": {
+      "properties": {
+        "bind": {
+          "maxLength": 64,
+          "title": "Bind",
+          "type": "string"
+        },
+        "port": {
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Port",
+          "type": "integer"
+        },
+        "proto": {
+          "maxLength": 8,
+          "title": "Proto",
+          "type": "string"
+        }
+      },
+      "required": [
+        "proto",
+        "port",
+        "bind"
+      ],
+      "title": "PortIn",
+      "type": "object"
+    }
+  },
+  "description": "미지의 필드는 무시한다 — 새 에이전트가 먼저 배포돼도 서버가 깨지지 않게.",
+  "properties": {
+    "agent_version": {
+      "maxLength": 32,
+      "title": "Agent Version",
+      "type": "string"
+    },
+    "collected": {
+      "description": "성공한 수집기 이름",
+      "items": {
+        "type": "string"
+      },
+      "title": "Collected",
+      "type": "array"
+    },
+    "collected_at": {
+      "description": "ISO-8601. 타임존이 없으면 UTC 로 간주",
+      "title": "Collected At",
+      "type": "string"
+    },
+    "containers": {
+      "description": "컨테이너(노드의 CRI·Docker). 수집기 containers",
+      "items": {
+        "$ref": "#/$defs/ContainerIn"
+      },
+      "maxItems": 5000,
+      "title": "Containers",
+      "type": "array"
+    },
+    "errors": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "실패한 수집기 이름 → 사유",
+      "title": "Errors",
+      "type": "object"
+    },
+    "hardware": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HardwareIn"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "장비 정보(VM/물리·제조사·시리얼·FQDN). 수집기 hardware"
+    },
+    "host_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Host Id",
+      "type": "string"
+    },
+    "hostname": {
+      "maxLength": 255,
+      "minLength": 1,
+      "title": "Hostname",
+      "type": "string"
+    },
+    "interfaces": {
+      "description": "네트워크 인터페이스(전역 주소만). 수집기 network.interfaces",
+      "items": {
+        "$ref": "#/$defs/InterfaceIn"
+      },
+      "maxItems": 256,
+      "title": "Interfaces",
+      "type": "array"
+    },
+    "k8s": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/K8sIn"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "이 호스트가 쿠버네티스 노드일 때의 식별 정보"
+    },
+    "kernel": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/KernelIn"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "os": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OsIn"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "packages": {
+      "items": {
+        "$ref": "#/$defs/PackageIn"
+      },
+      "maxItems": 100000,
+      "title": "Packages",
+      "type": "array"
+    },
+    "ports": {
+      "description": "리슨 중인 포트. 수집기 network.ports",
+      "items": {
+        "$ref": "#/$defs/PortIn"
+      },
+      "maxItems": 20000,
+      "title": "Ports",
+      "type": "array"
+    }
+  },
+  "required": [
+    "host_id",
+    "hostname",
+    "collected_at",
+    "agent_version"
+  ],
+  "title": "IngestSnapshot",
+  "type": "object"
+}

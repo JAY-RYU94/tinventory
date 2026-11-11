@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+*.db
+.env
+dist/
+demo.db
+windows-agent/artifacts/
+windows-agent/**/bin/
+windows-agent/**/obj/

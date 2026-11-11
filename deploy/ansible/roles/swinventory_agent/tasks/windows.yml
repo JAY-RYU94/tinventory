@@ -1,0 +1,144 @@
+---
+# Windows 대상(WinRM). 실제 Windows 에서는 아직 검증하지 못했다 — README 의 "검증 범위" 참고.
+- name: 서버가 배포하는 에이전트 sha256 조회(컨트롤 노드에서)
+  ansible.builtin.uri:
+    url: "{{ swinv_server_url }}/download/SHA256SUMS"
+    return_content: true
+    validate_certs: "{{ swinv_validate_certs }}"
+    ca_path: "{{ swinv_ca_file | default(omit, true) }}"
+  delegate_to: localhost
+  become: false
+  register: swinventory_agent_sums
+  changed_when: false
+  check_mode: false
+  when: swinv_state == 'present' and (swinv_agent_sha256_windows | length == 0)
+
+- name: 에이전트 sha256 확정
+  ansible.builtin.set_fact:
+    swinventory_agent_sha256_windows: >-
+      {{ swinv_agent_sha256_windows | lower if swinv_agent_sha256_windows | length > 0
+         else (swinventory_agent_sums.content | regex_search('([0-9a-f]{64})  swinventory-agent-win-x64\.exe', '\1') | first | default('')) }}
+  when: swinv_state == 'present'
+
+- name: SHA256 형식 확인
+  ansible.builtin.assert:
+    that: swinventory_agent_sha256_windows is match('^[0-9a-f]{64}$')
+    fail_msg: 서버에서 Windows 에이전트 sha256 을 얻지 못했다(서버 이미지에 exe 가 없으면 WITH_WINDOWS=1 로 빌드하거나 swinv_agent_sha256_windows 를 지정).
+    quiet: true
+  when: swinv_state == 'present'
+
+- name: 설치된 에이전트 해시 확인
+  ansible.windows.win_stat:
+    path: C:\Program Files\swinventory\swinventory-agent.exe
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: swinventory_agent_installed_win
+
+- name: 설치 필요 여부
+  ansible.builtin.set_fact:
+    swinventory_agent_needs_install: >-
+      {{ (swinv_force | bool) or not swinventory_agent_installed_win.stat.exists
+         or swinventory_agent_installed_win.stat.checksum != swinventory_agent_sha256_windows }}
+  when: swinv_state == 'present'
+
+- name: "[check 모드] 설치·갱신이 필요하다(실제로는 아무것도 바꾸지 않음)"
+  ansible.windows.win_shell: "exit 0"
+  changed_when: true
+  check_mode: false
+  when: swinv_state == 'present' and swinventory_agent_needs_install | bool and ansible_check_mode
+
+- name: 설치·갱신
+  when: swinv_state == 'present' and swinventory_agent_needs_install | bool and not ansible_check_mode
+  block:
+    - name: 임시 작업 디렉터리
+      ansible.windows.win_tempfile:
+        state: directory
+        prefix: swinv-
+      register: swinventory_agent_tmp_win
+
+    - name: 에이전트 내려받기(sha256 확인 — 다르면 실패하고 파일을 남기지 않는다)
+      ansible.windows.win_get_url:
+        url: "{{ swinv_server_url }}/download/swinventory-agent-win-x64.exe"
+        dest: "{{ swinventory_agent_tmp_win.path }}\\swinventory-agent.exe"
+        checksum: "{{ swinventory_agent_sha256_windows }}"
+        checksum_algorithm: sha256
+        validate_certs: "{{ swinv_validate_certs }}"
+
+    - name: 설치 스크립트 내려받기
+      ansible.windows.win_get_url:
+        url: "{{ swinv_server_url }}/install/windows.ps1"
+        dest: "{{ swinventory_agent_tmp_win.path }}\\install.ps1"
+        validate_certs: "{{ swinv_validate_certs }}"
+
+    - name: 수집 토큰을 임시 파일로 전달(명령 인자·로그에 남기지 않음)
+      ansible.windows.win_copy:
+        content: "{{ swinv_ingest_token }}"
+        dest: "{{ swinventory_agent_tmp_win.path }}\\token"
+      no_log: true
+
+    - name: 사설 CA 복사
+      ansible.windows.win_copy:
+        src: "{{ swinv_ca_file }}"
+        dest: "{{ swinventory_agent_tmp_win.path }}\\ca.pem"
+      when: swinv_ca_file | length > 0
+
+    - name: 에이전트 설치(저권한 LOCAL SERVICE 예약 작업 + 첫 수집 검증)
+      ansible.windows.win_shell: >-
+        & '{{ swinventory_agent_tmp_win.path }}\install.ps1'
+        -ServerUrl '{{ swinv_server_url }}'
+        -ExePath '{{ swinventory_agent_tmp_win.path }}\swinventory-agent.exe'
+        -TokenFile '{{ swinventory_agent_tmp_win.path }}\token'
+        -IntervalMinutes {{ swinv_interval_minutes | int }}
+        {{ "-CaFile '" ~ swinventory_agent_tmp_win.path ~ "\ca.pem'" if swinv_ca_file | length > 0 else "" }}
+        {{ "-AllowInsecureHttp" if swinv_allow_insecure_http | bool else "" }};
+        exit $LASTEXITCODE
+      register: swinventory_agent_install_win
+      changed_when: true
+      failed_when: swinventory_agent_install_win.rc != 0
+
+  always:
+    - name: 임시 파일(토큰 포함) 삭제
+      ansible.windows.win_file:
+        path: "{{ swinventory_agent_tmp_win.path }}"
+        state: absent
+      when: swinventory_agent_tmp_win is defined and swinventory_agent_tmp_win.path is defined
+
+- name: 데이터 디렉터리 확인(purge 대상)
+  ansible.windows.win_stat:
+    path: C:\ProgramData\swinventory
+  register: swinventory_agent_data_win
+  when: swinv_state == 'absent'
+
+- name: 제거 필요 여부
+  ansible.builtin.set_fact:
+    swinventory_agent_needs_removal: >-
+      {{ swinventory_agent_installed_win.stat.exists
+         or ((swinv_purge | bool) and swinventory_agent_data_win.stat.exists) }}
+  when: swinv_state == 'absent'
+
+- name: 제거
+  when: swinv_state == 'absent' and swinventory_agent_needs_removal | bool and not ansible_check_mode
+  block:
+    - name: 임시 작업 디렉터리
+      ansible.windows.win_tempfile:
+        state: directory
+        prefix: swinv-
+      register: swinventory_agent_tmp_win_rm
+
+    - name: 설치 스크립트 내려받기
+      ansible.windows.win_get_url:
+        url: "{{ swinv_server_url }}/install/windows.ps1"
+        dest: "{{ swinventory_agent_tmp_win_rm.path }}\\install.ps1"
+        validate_certs: "{{ swinv_validate_certs }}"
+
+    - name: 에이전트 제거
+      ansible.windows.win_shell: >-
+        & '{{ swinventory_agent_tmp_win_rm.path }}\install.ps1' -Uninstall {{ "-Purge" if swinv_purge | bool else "" }};
+        exit $LASTEXITCODE
+      changed_when: true
+  always:
+    - name: 임시 파일 삭제
+      ansible.windows.win_file:
+        path: "{{ swinventory_agent_tmp_win_rm.path }}"
+        state: absent
+      when: swinventory_agent_tmp_win_rm is defined and swinventory_agent_tmp_win_rm.path is defined

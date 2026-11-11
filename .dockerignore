@@ -1,0 +1,11 @@
+.venv
+.git
+dist
+**/__pycache__
+.pytest_cache
+*.db
+tests
+windows-agent/artifacts
+windows-agent/tests
+windows-agent/**/bin
+windows-agent/**/obj

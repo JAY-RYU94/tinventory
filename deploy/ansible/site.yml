@@ -1,0 +1,12 @@
+---
+# 사용:  ansible-playbook -i inventory.ini site.yml -e swinv_server_url=https://inventory.example.com -e @swinv-secrets.yml
+#   swinv-secrets.yml(ansible-vault encrypt 권장):  swinv_ingest_token: <수집 전용 토큰>
+#   제거:  ansible-playbook -i inventory.ini site.yml -e swinv_state=absent [-e swinv_purge=true]
+#   사전 점검(아무것도 바꾸지 않음):  ansible-playbook … --check
+- name: Swinventory 에이전트 등록
+  hosts: swinventory_targets
+  # Linux 는 root 가 필요하다(설치만 root, 에이전트는 비특권 계정). Windows(WinRM)·local 연결은 승격하지 않는다.
+  become: "{{ ansible_connection | default('ssh') not in ['winrm', 'psrp', 'local'] }}"
+  gather_facts: true
+  roles:
+    - swinventory_agent

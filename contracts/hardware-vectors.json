@@ -1,0 +1,295 @@
+{
+ "_comment": "\uc7a5\ube44 \uc815\ubcf4 \ud310\uc815 \uaddc\uce59\uc758 \uacf5\uc720 conformance \ubca1\ud130. Python(common/hardware.py)\uacfc C#(Collectors/Hardware.cs)\uc774 \uac01\uc790 \uc2e4\ud589\ud55c\ub2e4 \u2014 \ud55c\ucabd\ub9cc \uaddc\uce59\uc744 \ubc14\uafb8\uba74 \uc774 \ud30c\uc77c\ub85c \ub4dc\ub7ec\ub09c\ub2e4.",
+ "classify": [
+  {
+   "vendor": "Dell Inc.",
+   "model": "PowerEdge R740",
+   "expect": [
+    "physical",
+    ""
+   ]
+  },
+  {
+   "vendor": "HPE",
+   "model": "ProLiant DL380 Gen10",
+   "expect": [
+    "physical",
+    ""
+   ]
+  },
+  {
+   "vendor": "VMware, Inc.",
+   "model": "VMware7,1",
+   "expect": [
+    "virtual",
+    "vmware"
+   ]
+  },
+  {
+   "vendor": "VMware, Inc.",
+   "model": "VMware Virtual Platform",
+   "expect": [
+    "virtual",
+    "vmware"
+   ]
+  },
+  {
+   "vendor": "QEMU",
+   "model": "Standard PC (Q35 + ICH9, 2009)",
+   "expect": [
+    "virtual",
+    "kvm"
+   ]
+  },
+  {
+   "vendor": "Red Hat",
+   "model": "KVM",
+   "expect": [
+    "virtual",
+    "kvm"
+   ]
+  },
+  {
+   "vendor": "Microsoft Corporation",
+   "model": "Virtual Machine",
+   "expect": [
+    "virtual",
+    "hyperv"
+   ]
+  },
+  {
+   "vendor": "innotek GmbH",
+   "model": "VirtualBox",
+   "expect": [
+    "virtual",
+    "virtualbox"
+   ]
+  },
+  {
+   "vendor": "Xen",
+   "model": "HVM domU",
+   "expect": [
+    "virtual",
+    "xen"
+   ]
+  },
+  {
+   "vendor": "Amazon EC2",
+   "model": "t3.large",
+   "expect": [
+    "virtual",
+    "aws"
+   ]
+  },
+  {
+   "vendor": "Google",
+   "model": "Google Compute Engine",
+   "expect": [
+    "virtual",
+    "gcp"
+   ]
+  },
+  {
+   "vendor": "OpenStack Foundation",
+   "model": "OpenStack Nova",
+   "expect": [
+    "virtual",
+    "openstack"
+   ]
+  },
+  {
+   "vendor": "Parallels Software International Inc.",
+   "model": "Parallels Virtual Platform",
+   "expect": [
+    "virtual",
+    "parallels"
+   ]
+  },
+  {
+   "vendor": "Nutanix",
+   "model": "AHV",
+   "expect": [
+    "virtual",
+    "ahv"
+   ]
+  },
+  {
+   "vendor": "Microsoft Corporation",
+   "model": "Surface Pro 9",
+   "expect": [
+    "physical",
+    ""
+   ]
+  },
+  {
+   "vendor": "",
+   "model": "",
+   "expect": [
+    "unknown",
+    ""
+   ]
+  },
+  {
+   "vendor": "",
+   "model": "",
+   "hypervisor_flag": true,
+   "expect": [
+    "virtual",
+    "unknown"
+   ]
+  },
+  {
+   "vendor": "Dell Inc.",
+   "model": "PowerEdge R740",
+   "detected": "kvm",
+   "expect": [
+    "virtual",
+    "kvm"
+   ]
+  },
+  {
+   "vendor": "Dell Inc.",
+   "model": "PowerEdge R740",
+   "detected": "none",
+   "expect": [
+    "physical",
+    ""
+   ]
+  },
+  {
+   "vendor": "QEMU",
+   "model": "KVM",
+   "container": "docker",
+   "expect": [
+    "container",
+    "docker"
+   ]
+  },
+  {
+   "vendor": "Dell Inc.",
+   "model": "PowerEdge R740",
+   "container": "none",
+   "expect": [
+    "physical",
+    ""
+   ]
+  },
+  {
+   "vendor": "",
+   "model": "",
+   "bios_vendor": "SeaBIOS Bochs",
+   "expect": [
+    "virtual",
+    "kvm"
+   ]
+  }
+ ],
+ "serial": [
+  {
+   "raw": "ABC1234XYZ",
+   "clean": "ABC1234XYZ",
+   "normalized": "ABC1234XYZ"
+  },
+  {
+   "raw": "  ABC1234XYZ \n",
+   "clean": "ABC1234XYZ",
+   "normalized": "ABC1234XYZ"
+  },
+  {
+   "raw": "VMware-56 4d 5c 7e",
+   "clean": "VMware-56 4d 5c 7e",
+   "normalized": "VMWARE564D5C7E"
+  },
+  {
+   "raw": "vmware-56-4d-5c-7e",
+   "clean": "vmware-56-4d-5c-7e",
+   "normalized": "VMWARE564D5C7E"
+  },
+  {
+   "raw": "",
+   "clean": "",
+   "normalized": ""
+  },
+  {
+   "raw": "None",
+   "clean": "",
+   "normalized": ""
+  },
+  {
+   "raw": "N/A",
+   "clean": "",
+   "normalized": ""
+  },
+  {
+   "raw": "Default string",
+   "clean": "",
+   "normalized": ""
+  },
+  {
+   "raw": "To Be Filled By O.E.M.",
+   "clean": "",
+   "normalized": ""
+  },
+  {
+   "raw": "Not Specified",
+   "clean": "",
+   "normalized": ""
+  },
+  {
+   "raw": "System Serial Number",
+   "clean": "",
+   "normalized": ""
+  },
+  {
+   "raw": "0",
+   "clean": "",
+   "normalized": ""
+  },
+  {
+   "raw": "0000000000",
+   "clean": "",
+   "normalized": ""
+  },
+  {
+   "raw": "00000000-0000-0000-0000-000000000000",
+   "clean": "",
+   "normalized": ""
+  },
+  {
+   "raw": "FFFFFFFF",
+   "clean": "",
+   "normalized": ""
+  },
+  {
+   "raw": "SN\u00001",
+   "clean": "SN1",
+   "normalized": "SN1"
+  }
+ ],
+ "domain": [
+  {
+   "fqdn": "web01.corp.example.com",
+   "domain": "corp.example.com"
+  },
+  {
+   "fqdn": "WEB01.Corp.Local",
+   "domain": "corp.local"
+  },
+  {
+   "fqdn": "web01",
+   "domain": ""
+  },
+  {
+   "fqdn": "",
+   "domain": ""
+  },
+  {
+   "fqdn": "web01.",
+   "domain": ""
+  },
+  {
+   "fqdn": ".corp.example.com",
+   "domain": ""
+  }
+ ]
+}

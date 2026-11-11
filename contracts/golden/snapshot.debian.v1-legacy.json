@@ -1,0 +1,18 @@
+{
+  "host_id": "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+  "hostname": "web01",
+  "collected_at": "2026-11-05T01:02:03+00:00",
+  "agent_version": "0.1.0",
+  "os": {"family": "debian", "name": "Ubuntu 22.04.4 LTS", "version": "22.04"},
+  "kernel": {
+    "running": "5.15.0-91-generic",
+    "installed": ["5.15.0-91-generic", "5.15.0-100-generic"],
+    "reboot_required": true
+  },
+  "packages": [
+    {"source": "dpkg", "name": "bash", "version": "5.1-6ubuntu1", "arch": "amd64"},
+    {"source": "dpkg", "name": "openssl", "version": "3.0.2-0ubuntu1.15", "arch": "amd64"}
+  ],
+  "collected": ["os", "kernel", "software.dpkg"],
+  "errors": {}
+}

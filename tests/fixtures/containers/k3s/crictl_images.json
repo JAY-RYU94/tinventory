@@ -1,0 +1,28 @@
+{
+  "images":  [
+    {
+      "id":  "sha256:0594e75cdd5df85c117280c0671da048b04e853ac30c7e078fe5ad981dfa92cd",
+      "repoTags":  [
+        "docker.io/rancher/local-path-provisioner:v0.0.32"
+      ],
+      "repoDigests":  [
+        "docker.io/rancher/local-path-provisioner@sha256:9289da488b07912cb4128eb96928a331a5f3e60c28c5cfc5790f354a4ad0cc68"
+      ],
+      "size":  "20048530",
+      "username":  "",
+      "pinned":  false
+    },
+    {
+      "id":  "sha256:7ff8c97cbda192b744217508a185c1a88f9c3e7d190990ff86db0dff4c20909d",
+      "repoTags":  [
+        "docker.io/rancher/mirrored-coredns-coredns:1.12.3"
+      ],
+      "repoDigests":  [
+        "docker.io/rancher/mirrored-coredns-coredns@sha256:1391544c978029fcddc65068f6ad67f396e55585b664ecccd7fefba029b9b706"
+      ],
+      "size":  "20413463",
+      "username":  "nonroot",
+      "pinned":  false
+    }
+  ]
+}

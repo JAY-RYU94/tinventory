@@ -1,0 +1,22 @@
+---
+# swinventory 에이전트 설치/제거 역할 — Linux(Debian·Ubuntu·RHEL 계열)와 Windows Server.
+# 서버(swinventory)가 배포하는 에이전트를 내려받아 sha256 을 확인한 뒤 설치한다. 이미 같은 해시가 설치돼 있으면 아무것도 하지 않는다(멱등).
+
+swinv_state: present            # present(설치·갱신) | absent(제거)
+swinv_server_url: ""            # 필수. 예) https://inventory.example.com  (대상 서버가 접근할 수 있는 주소)
+swinv_ingest_token: ""          # 필수(present). 수집 전용 토큰 — ansible-vault 로 암호화한 변수로 둔다. 로그에 남지 않는다(no_log)
+
+# 에이전트 sha256. 비워 두면 컨트롤 노드가 서버의 /download/SHA256SUMS 를 조회한다(TLS 로 보호).
+# 더 강하게 고정하려면 관리자 화면 "서버 등록"이 보여 주는 해시를 직접 지정한다.
+swinv_agent_sha256_linux: ""
+swinv_agent_sha256_windows: ""
+
+swinv_validate_certs: true      # 컨트롤 노드의 다운로드 점검에 쓴다
+swinv_ca_file: ""               # 사설 CA(PEM) 경로(컨트롤 노드). 지정하면 대상 서버로 복사해 에이전트의 ca_file 로 설치한다
+swinv_allow_insecure_http: false  # 실험실 전용. 운영은 https 만
+swinv_force: false              # true 면 같은 해시여도 다시 설치(토큰·서버 주소·CA 를 바꿨을 때)
+swinv_purge: false              # absent 일 때 설정·스풀·계정까지 삭제
+
+swinv_interval: hourly          # Linux systemd timer(OnCalendar 표기)
+swinv_interval_minutes: 60      # Windows 예약 작업 주기(분)
+swinv_linux_user: swinventory   # 에이전트를 실행할 비특권 계정

@@ -1,0 +1,59 @@
+# 서버 + PostgreSQL.  cp .env.example .env  (토큰·DB 비밀번호 설정)  →  docker compose up -d --build
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: swinv
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 를 .env 에 설정하세요}
+      POSTGRES_DB: swinv
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U swinv -d swinv"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  server:
+    build:
+      context: .
+      args:
+        WITH_WINDOWS: ${WITH_WINDOWS:-1}   # 0 이면 Windows exe 빌드를 건너뛴다(빠른 검증용)
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SWINV_DB_URL: postgresql+psycopg://swinv:${POSTGRES_PASSWORD}@db:5432/swinv
+      SWINV_INGEST_TOKENS: ${SWINV_INGEST_TOKENS:?SWINV_INGEST_TOKENS 를 .env 에 설정하세요}
+      SWINV_READ_TOKENS: ${SWINV_READ_TOKENS:?SWINV_READ_TOKENS 를 .env 에 설정하세요}
+      SWINV_ADMIN_TOKENS: ${SWINV_ADMIN_TOKENS:?SWINV_ADMIN_TOKENS 를 .env 에 설정하세요}
+      SWINV_STALE_AFTER_HOURS: ${SWINV_STALE_AFTER_HOURS:-48}
+      SWINV_SECRET_KEY: ${SWINV_SECRET_KEY:-}          # 설정(AI API 키) 암호화 키. 비우면 /data/secret.key 를 만들어 쓴다
+      SWINV_PUBLIC_URL: ${SWINV_PUBLIC_URL:-}                # 프록시 뒤라면 설치 명령에 넣을 서버 주소(예: https://inventory.corp.example)
+      SWINV_AI_ENDPOINT_ALLOWLIST: ${SWINV_AI_ENDPOINT_ALLOWLIST:-}   # AI 엔드포인트 호스트 허용 목록(쉼표). 비우면 제한 없음
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}              # 설정에 키가 없을 때의 폴백
+    volumes:
+      - appdata:/data                                  # 암호화 키 보존(컨테이너를 재생성해도 유지)
+    ports:
+      # 기본은 로컬만. 사내망에 열려면 SWINV_BIND=0.0.0.0 — 이때는 반드시 TLS 종단(리버스 프록시) 뒤에 둔다.
+      - "${SWINV_BIND:-127.0.0.1}:${SWINV_PORT:-8000}:8000"
+
+  # 보존 정리: docker compose --profile maintenance run --rm prune   (cron 으로 주기 실행)
+  prune:
+    build:
+      context: .
+      args:
+        WITH_WINDOWS: ${WITH_WINDOWS:-1}
+    profiles: ["maintenance"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SWINV_DB_URL: postgresql+psycopg://swinv:${POSTGRES_PASSWORD}@db:5432/swinv
+    command: ["python", "-m", "swinventory.server", "prune", "--snapshot-days", "30", "--event-days", "365", "--host-days", "180"]
+
+volumes:
+  dbdata:
+  appdata:

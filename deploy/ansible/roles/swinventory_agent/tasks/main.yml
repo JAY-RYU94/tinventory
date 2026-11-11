@@ -1,0 +1,26 @@
+---
+- name: 입력 변수 확인
+  ansible.builtin.assert:
+    that:
+      - swinv_state in ['present', 'absent']
+      - swinv_server_url is match('^https?://[A-Za-z0-9._~:/?#@!%+=,\[\]-]+$')
+      - swinv_server_url is match('^https://') or (swinv_allow_insecure_http | bool)
+      - swinv_state == 'absent' or (swinv_ingest_token | length > 0)
+    fail_msg: >-
+      swinv_server_url(https://…), swinv_ingest_token(설치 시) 이 필요하다. 평문 http 는 swinv_allow_insecure_http=true 일 때만 허용한다(실험실 전용).
+    quiet: true
+  tags: [always]
+
+- name: Linux 대상
+  ansible.builtin.include_tasks: linux.yml
+  when: ansible_facts['system'] == 'Linux'
+
+- name: Windows 대상
+  ansible.builtin.include_tasks: windows.yml
+  when: ansible_facts['os_family'] == 'Windows'
+
+- name: 지원하지 않는 플랫폼
+  ansible.builtin.fail:
+    msg: >-
+      지원하지 않는 플랫폼이다: {{ ansible_facts['system'] | default('?') }} / {{ ansible_facts['os_family'] | default('?') }}
+  when: ansible_facts['system'] != 'Linux' and ansible_facts['os_family'] != 'Windows'

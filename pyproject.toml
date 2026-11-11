@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swinventory"
+version = "0.1.0"
+description = "서버 설치 소프트웨어·커널 버전 수집/관리 시스템"
+requires-python = ">=3.10"
+dependencies = []  # agent 는 표준 라이브러리만 사용
+
+[project.optional-dependencies]
+server = ["fastapi>=0.110", "sqlalchemy>=2.0", "uvicorn>=0.29", "cryptography>=42"]
+postgres = ["psycopg[binary]>=3.1"]
+dev = ["pytest>=8", "httpx>=0.27"]
+ui-test = ["playwright>=1.45"]   # tests/ui (시스템 Chrome 필요, 없으면 건너뜀)
+
+[project.scripts]
+swinventory-agent = "swinventory.agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"swinventory.server" = ["web/*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]

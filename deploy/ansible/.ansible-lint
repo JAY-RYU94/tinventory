@@ -1,0 +1,5 @@
+---
+# 공개 변수 swinv_* 는 사용자가 쓰는 인터페이스라 role 접두어(swinventory_agent_)로 바꾸지 않는다. 내부 register·set_fact 는 접두어를 쓴다.
+profile: production
+skip_list:
+  - var-naming[no-role-prefix]

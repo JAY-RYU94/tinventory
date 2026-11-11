@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>swinventory · 서버 소프트웨어·커널 현황</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header id="top" hidden>
+    <strong class="brand">swinventory</strong>
+    <nav id="nav" aria-label="주 메뉴">
+      <a href="#/overview" data-route="overview">개요</a>
+      <a href="#/kernels" data-route="kernels">커널</a>
+      <a href="#/software" data-route="software">소프트웨어</a>
+      <a href="#/hosts" data-route="hosts">호스트</a>
+      <a href="#/assets" data-route="assets">자산</a>
+      <a href="#/containers" data-route="containers">컨테이너</a>
+      <a href="#/network" data-route="network">네트워크</a>
+      <a href="#/events" data-route="events">변경 이력</a>
+      <a href="#/reports" data-route="reports">AI 리포트</a>
+      <a href="#/enroll" data-route="enroll">서버 등록</a>
+      <a href="#/settings" data-route="settings">설정</a>
+    </nav>
+    <span id="role" class="badge" hidden></span>
+    <button id="logout" type="button" class="link">로그아웃</button>
+  </header>
+  <main id="app"></main>
+  <script src="/app.js"></script>
+</body>
+</html>

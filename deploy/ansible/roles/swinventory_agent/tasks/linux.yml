@@ -1,0 +1,143 @@
+---
+- name: 서버가 배포하는 에이전트 sha256 조회(컨트롤 노드에서)
+  ansible.builtin.uri:
+    url: "{{ swinv_server_url }}/download/SHA256SUMS"
+    return_content: true
+    validate_certs: "{{ swinv_validate_certs }}"
+    ca_path: "{{ swinv_ca_file | default(omit, true) }}"
+  delegate_to: localhost
+  become: false
+  register: swinventory_agent_sums
+  changed_when: false
+  check_mode: false
+  when: swinv_state == 'present' and (swinv_agent_sha256_linux | length == 0)
+
+- name: 에이전트 sha256 확정
+  ansible.builtin.set_fact:
+    swinventory_agent_sha256_linux: >-
+      {{ swinv_agent_sha256_linux | lower if swinv_agent_sha256_linux | length > 0
+         else (swinventory_agent_sums.content | regex_search('([0-9a-f]{64})  swinventory-agent\.pyz', '\1') | first | default('')) }}
+  when: swinv_state == 'present'
+
+- name: SHA256 형식 확인
+  ansible.builtin.assert:
+    that: swinventory_agent_sha256_linux is match('^[0-9a-f]{64}$')
+    fail_msg: 서버에서 에이전트 sha256 을 얻지 못했다(서버에 Linux 에이전트가 없거나 swinv_agent_sha256_linux 형식 오류).
+    quiet: true
+  when: swinv_state == 'present'
+
+- name: 설치된 에이전트 해시 확인
+  ansible.builtin.stat:
+    path: /usr/local/lib/swinventory/swinventory-agent.pyz
+    checksum_algorithm: sha256
+  register: swinventory_agent_installed
+
+- name: 설치 필요 여부
+  ansible.builtin.set_fact:
+    swinventory_agent_needs_install: >-
+      {{ (swinv_force | bool) or not swinventory_agent_installed.stat.exists
+         or swinventory_agent_installed.stat.checksum != swinventory_agent_sha256_linux }}
+  when: swinv_state == 'present'
+
+- name: "[check 모드] 설치·갱신이 필요하다(실제로는 아무것도 바꾸지 않음)"
+  ansible.builtin.command: "true"
+  changed_when: true
+  check_mode: false
+  when: swinv_state == 'present' and swinventory_agent_needs_install | bool and ansible_check_mode
+
+- name: 설치·갱신
+  when: swinv_state == 'present' and swinventory_agent_needs_install | bool and not ansible_check_mode
+  block:
+    - name: 임시 작업 디렉터리(0700)
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: swinv-
+      register: swinventory_agent_tmp
+
+    - name: 설치 스크립트 내려받기(서버에서)
+      ansible.builtin.get_url:
+        url: "{{ swinv_server_url }}/install/linux.sh"
+        dest: "{{ swinventory_agent_tmp.path }}/install.sh"
+        mode: "0700"
+        validate_certs: "{{ swinv_validate_certs }}"
+        ca_path: "{{ swinv_ca_file | default(omit, true) }}"
+
+    - name: 수집 토큰을 임시 파일(0600)로 전달(명령 인자·로그에 남기지 않음)
+      ansible.builtin.copy:
+        content: "{{ swinv_ingest_token }}"
+        dest: "{{ swinventory_agent_tmp.path }}/token"
+        mode: "0600"
+      no_log: true
+
+    - name: 사설 CA 복사
+      ansible.builtin.copy:
+        src: "{{ swinv_ca_file }}"
+        dest: "{{ swinventory_agent_tmp.path }}/ca.pem"
+        mode: "0644"
+      when: swinv_ca_file | length > 0
+
+    - name: 에이전트 설치(서버에서 내려받아 sha256 확인 → 비특권 계정으로 첫 수집 검증)
+      ansible.builtin.command:
+        argv: >-
+          {{ ['sh', swinventory_agent_tmp.path ~ '/install.sh',
+              '--token-file', swinventory_agent_tmp.path ~ '/token',
+              '--server-url', swinv_server_url,
+              '--agent-url', swinv_server_url ~ '/download/swinventory-agent.pyz',
+              '--sha256', swinventory_agent_sha256_linux,
+              '--user', swinv_linux_user,
+              '--interval', swinv_interval]
+             + (['--ca-file', swinventory_agent_tmp.path ~ '/ca.pem'] if swinv_ca_file | length > 0 else [])
+             + (['--allow-insecure-http'] if swinv_allow_insecure_http | bool else []) }}
+      register: swinventory_agent_install
+      changed_when: true
+      failed_when: swinventory_agent_install.rc != 0
+
+  always:
+    - name: 임시 파일(토큰 포함) 삭제
+      ansible.builtin.file:
+        path: "{{ swinventory_agent_tmp.path }}"
+        state: absent
+      when: swinventory_agent_tmp is defined and swinventory_agent_tmp.path is defined
+
+- name: 설정 디렉터리 확인(purge 대상)
+  ansible.builtin.stat:
+    path: /etc/swinventory
+  register: swinventory_agent_conf
+  when: swinv_state == 'absent'
+
+- name: 제거 필요 여부
+  ansible.builtin.set_fact:
+    swinventory_agent_needs_removal: >-
+      {{ swinventory_agent_installed.stat.exists
+         or ((swinv_purge | bool) and swinventory_agent_conf.stat.exists) }}
+  when: swinv_state == 'absent'
+
+- name: 제거
+  when: swinv_state == 'absent' and swinventory_agent_needs_removal | bool and not ansible_check_mode
+  block:
+    - name: 임시 작업 디렉터리
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: swinv-
+      register: swinventory_agent_tmp_rm
+
+    - name: 설치 스크립트 내려받기(서버에서)
+      ansible.builtin.get_url:
+        url: "{{ swinv_server_url }}/install/linux.sh"
+        dest: "{{ swinventory_agent_tmp_rm.path }}/install.sh"
+        mode: "0700"
+        validate_certs: "{{ swinv_validate_certs }}"
+        ca_path: "{{ swinv_ca_file | default(omit, true) }}"
+
+    - name: 에이전트 제거
+      ansible.builtin.command:
+        argv: >-
+          {{ ['sh', swinventory_agent_tmp_rm.path ~ '/install.sh', '--uninstall', '--user', swinv_linux_user]
+             + (['--purge'] if swinv_purge | bool else []) }}
+      changed_when: true
+  always:
+    - name: 임시 파일 삭제
+      ansible.builtin.file:
+        path: "{{ swinventory_agent_tmp_rm.path }}"
+        state: absent
+      when: swinventory_agent_tmp_rm is defined and swinventory_agent_tmp_rm.path is defined

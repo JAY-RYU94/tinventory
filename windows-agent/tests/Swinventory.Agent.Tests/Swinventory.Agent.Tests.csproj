@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <!-- 테스트 코드는 xUnit 분석기 경고를 엄격히 따르지 않는다(가독성 우선) -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
+    <PackageReference Include="xunit" Version="2.*" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.*" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Swinventory.Agent\Swinventory.Agent.csproj" />
+    <!-- 공유 계약 예시(Python 서버와 같은 파일) -->
+    <Content Include="..\..\..\contracts\golden\*.json" Link="golden\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <!-- 장비 판정 규칙의 공유 conformance 벡터(Python 과 같은 파일) -->
+    <Content Include="..\..\..\contracts\hardware-vectors.json" Link="contracts\hardware-vectors.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
