@@ -27,8 +27,11 @@ services:
     environment:
       SWINV_DB_URL: postgresql+psycopg://swinv:${POSTGRES_PASSWORD}@db:5432/swinv
       SWINV_INGEST_TOKENS: ${SWINV_INGEST_TOKENS:?SWINV_INGEST_TOKENS 를 .env 에 설정하세요}
-      SWINV_READ_TOKENS: ${SWINV_READ_TOKENS:?SWINV_READ_TOKENS 를 .env 에 설정하세요}
-      SWINV_ADMIN_TOKENS: ${SWINV_ADMIN_TOKENS:?SWINV_ADMIN_TOKENS 를 .env 에 설정하세요}
+      SWINV_READ_TOKENS: ${SWINV_READ_TOKENS:-}
+      SWINV_ADMIN_TOKENS: ${SWINV_ADMIN_TOKENS:-}
+      SWINV_ADMIN_USERNAME: ${SWINV_ADMIN_USERNAME:-}  # 첫 계정이 없을 때만 생성
+      SWINV_ADMIN_PASSWORD: ${SWINV_ADMIN_PASSWORD:-}
+      SWINV_JWT_SECRET: ${SWINV_JWT_SECRET:-}          # 선택: 32바이트 이상. 비우면 보존된 secret.key 에서 파생
       SWINV_STALE_AFTER_HOURS: ${SWINV_STALE_AFTER_HOURS:-48}
       SWINV_SECRET_KEY: ${SWINV_SECRET_KEY:-}          # 설정(AI API 키) 암호화 키. 비우면 /data/secret.key 를 만들어 쓴다
       SWINV_PUBLIC_URL: ${SWINV_PUBLIC_URL:-}                # 프록시 뒤라면 설치 명령에 넣을 서버 주소(예: https://inventory.corp.example)

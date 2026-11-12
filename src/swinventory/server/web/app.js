@@ -15,10 +15,10 @@
   let currentName = "overview"; // 지금 메뉴 이름 — 문서 제목과 표 정렬 기억의 범위
 
   // 권한 부족(403)과 '관리자 전용 컨트롤을 끈 이유'는 이 문구 하나로 통일한다.
-  const ADMIN_ONLY = "관리자 토큰으로 로그인해야 합니다";
+  const ADMIN_ONLY = "관리자 권한으로 로그인해야 합니다";
   const NET_DOWN = "서버에 연결할 수 없습니다(잠시 후 다시 시도).";
   const PAGE_ROWS = 200; // 표는 한 번에 이만큼만 그리고 '더 보기'로 늘린다
-  const SCREEN = { overview: "개요", kernels: "커널", software: "소프트웨어", hosts: "호스트", assets: "자산", containers: "컨테이너", network: "네트워크", events: "변경 이력", reports: "AI 리포트", enroll: "서버 등록", settings: "설정" };
+  const SCREEN = { overview: "개요", kernels: "커널", software: "소프트웨어", hosts: "호스트", assets: "자산", containers: "컨테이너", network: "네트워크", events: "변경 이력", reports: "AI 리포트", enroll: "서버 등록", settings: "설정", accounts: "계정·권한" };
 
   const EVENT_LABELS = {
     package_installed: ["설치", "ok"], package_removed: ["삭제", "err"],
@@ -231,7 +231,7 @@
   }
   // 값을 읽을 수 있어야 하는 입력(태그 목록 등)은 disabled 대신 readonly 로 둔다.
   function gateText(el) { if (!isAdmin()) { el.readOnly = true; el.title = ADMIN_ONLY; } return el; }
-  const adminNote = () => (isAdmin() ? null : h("p", { class: "hint admin-note" }, `조회 전용 토큰입니다. 변경·삭제·생성은 ${ADMIN_ONLY}.`));
+  const adminNote = () => (isAdmin() ? null : h("p", { class: "hint admin-note" }, `조회 권한으로 접속했습니다. 변경·삭제·생성은 ${ADMIN_ONLY}.`));
   const errMsg = (err, prefix) => (err.status === 403 ? ADMIN_ONLY : prefix ? `${prefix}: ${err.message}` : err.message);
 
   // ---------- API ----------
@@ -311,7 +311,7 @@
     return [input, err];
   }
 
-  const VIEWS = { overview: viewOverview, kernels: viewKernels, software: viewSoftware, hosts: viewHosts, assets: viewAssets, containers: viewContainers, events: viewEvents, reports: viewReports, settings: viewSettings, network: viewNetwork, enroll: viewEnroll };
+  const VIEWS = { accounts: viewAccounts, overview: viewOverview, kernels: viewKernels, software: viewSoftware, hosts: viewHosts, assets: viewAssets, containers: viewContainers, events: viewEvents, reports: viewReports, settings: viewSettings, network: viewNetwork, enroll: viewEnroll };
 
   const titled = (node, sub) => { node.dataset.title = sub; return node; }; // 상세 화면은 대상 이름을 문서 제목에 싣는다
   const documentTitle = (name, sub) => (sub ? `${sub} · ${SCREEN[name]} · swinventory` : `${SCREEN[name]} · swinventory`);
@@ -320,7 +320,7 @@
     $role.hidden = false;
     $role.textContent = isAdmin() ? "관리자" : "조회 전용";
     $role.className = "badge " + (isAdmin() ? "ok" : "neutral");
-    $role.title = isAdmin() ? "관리자 토큰으로 로그인했습니다" : `조회 전용 토큰입니다. 변경 기능은 ${ADMIN_ONLY}.`;
+    $role.title = isAdmin() ? "관리자 권한으로 로그인했습니다" : `조회 권한으로 접속했습니다. 변경 기능은 ${ADMIN_ONLY}.`;
   }
   async function loadRole() {
     try {
@@ -418,7 +418,7 @@
     const input = h("input", { id: "login-token", type: "password", placeholder: "조회 토큰 또는 관리자 토큰", autocomplete: "off", required: true });
     const note = message ? h("div", { class: "error", role: "alert" }, message)
       : h("div", { class: "muted" }, "서버 관리자에게 받은 조회 토큰 또는 관리자 토큰을 입력하세요. 탭을 닫으면 지워집니다.");
-    const submit = h("button", { class: "primary", type: "submit" }, "로그인");
+    const submit = h("button", { type: "submit" }, "토큰으로 접속");
     const form = h("form", { onsubmit: async (e) => {
       e.preventDefault();
       const candidate = input.value.trim();
@@ -430,8 +430,27 @@
         if (location.hash) render(); else location.hash = "#/overview"; // 딥링크로 들어왔다면 원래 페이지로(해시가 바뀌면 hashchange 가 그린다)
       } catch (err) { token = ""; role = ""; renderLogin(loginError(err)); }
     } }, h("label", { for: "login-token", class: "muted" }, "토큰"), input, submit);
-    clear($app).append(h("div", { class: "login panel" }, h("h1", null, "swinventory"), note, form));
-    input.focus();
+    const username = h("input", { id: "login-id", autocomplete: "username", required: true, maxlength: 64 });
+    const password = h("input", { id: "login-password", type: "password", autocomplete: "current-password", required: true, maxlength: 128 });
+    const accountMsg = msgBox();
+    const accountSubmit = h("button", { class: "primary", type: "submit" }, "로그인");
+    const accountForm = h("form", { onsubmit: async (e) => {
+      e.preventDefault(); accountSubmit.disabled = true; accountMsg.clear();
+      try {
+        const res = await fetch("/v1/auth/login", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: username.value.trim(), password: password.value }) });
+        let result;
+        try { result = await res.json(); } catch (_) { throw new Error(NET_DOWN); }
+        if (!res.ok) throw new Error(typeof result.detail === "string" ? result.detail : "로그인에 실패했습니다.");
+        password.value = ""; token = result.access_token; role = "";
+        sessionStorage.setItem(TOKEN_KEY, token);
+        if (location.hash) render(); else location.hash = "#/overview";
+      } catch (err) { password.value = ""; accountMsg.err(err instanceof TypeError ? NET_DOWN : err.message || NET_DOWN); accountSubmit.disabled = false; }
+    } }, field("ID", username), field("비밀번호", password), accountSubmit, accountMsg.el);
+    clear($app).append(h("div", { class: "login panel" }, h("h1", null, "swinventory"),
+      message ? note : h("p", { class: "muted" }, "관리자에게 발급받은 계정으로 로그인하세요."), accountForm,
+      h("details", { class: "token-login" }, h("summary", null, "JWT·기존 토큰으로 로그인"), form)));
+    username.focus();
   }
 
   // ---------- 개요 ----------
@@ -1567,6 +1586,98 @@
       h("pre", { class: "json", tabindex: "0" }, JSON.stringify(f, null, 2))), "근거 집계");
   }
 
+  // ---------- 계정·권한·JWT ----------
+  async function viewAccounts() {
+    const me = await api("/v1/auth/me");
+    const msg = msgBox();
+    const current = h("input", { type: "password", autocomplete: "current-password", required: true, maxlength: 128 });
+    const next = h("input", { type: "password", autocomplete: "new-password", required: true, minlength: 12, maxlength: 128 });
+    const change = h("button", { type: "submit", class: "primary" }, "비밀번호 변경");
+    const personal = h("form", { class: "panel form", onsubmit: async (e) => {
+      e.preventDefault(); change.disabled = true;
+      try { await api("/v1/auth/password", { method: "POST", body: JSON.stringify({ current_password: current.value, new_password: next.value }) });
+        current.value = ""; next.value = ""; logout("비밀번호를 변경했습니다. 새 비밀번호로 로그인하세요.");
+      } catch (err) { current.value = ""; msg.err(errMsg(err)); change.disabled = false; }
+    } }, field("현재 비밀번호", current), field("새 비밀번호", next, "12~128자"), change, msg.el);
+    const page = h("div", null, h("h1", null, "계정·권한"), h("h2", null, "내 비밀번호 변경"),
+      h("p", { class: "hint" }, me.username ? `로그인 계정: ${me.username}. 비밀번호 변경 후 모든 로그인과 사용자 API 토큰이 해제됩니다.` : "토큰으로 접속했습니다."),
+      me.kind === "session" ? personal : h("p", { class: "panel notice" }, "본인 비밀번호를 변경하려면 ID·비밀번호로 로그인하세요."));
+    if (!isAdmin()) return page;
+    const [users, tokens] = await Promise.all([api("/v1/users"), api("/v1/tokens")]);
+    const managementMsg = msgBox();
+    const editor = h("div");
+    const roleSelect = (value = "read", ingest = false) => h("select", null,
+      [["read", "조회"], ["admin", "관리자"], ...(ingest ? [["ingest", "수집 전용"]] : [])].map(([v, label]) => h("option", { value: v, selected: v === value }, label)));
+    const edit = (user) => {
+      const selectedRole = roleSelect(user.role);
+      const active = h("input", { type: "checkbox", checked: user.active });
+      const reset = h("input", { type: "password", autocomplete: "new-password", minlength: 12, maxlength: 128 });
+      const save = h("button", { type: "submit", class: "primary" }, "변경 적용");
+      const editMsg = msgBox();
+      const form = h("form", { class: "panel form", onsubmit: async (e) => {
+        e.preventDefault(); save.disabled = true;
+        const patch = {};
+        if (selectedRole.value !== user.role) patch.role = selectedRole.value;
+        if (active.checked !== user.active) patch.active = active.checked;
+        if (reset.value) patch.password = reset.value;
+        try { await api(`/v1/users/${enc(user.id)}`, { method: "PATCH", body: JSON.stringify(patch) }); reset.value = ""; await render(); }
+        catch (err) { reset.value = ""; editMsg.err(errMsg(err)); save.disabled = false; }
+      } }, h("h3", null, `${user.username} 계정 변경`), field("사용자 권한", selectedRole), field("계정 활성", active),
+        field("비밀번호 초기화", reset, "비워 두면 유지합니다. 변경하면 기존 JWT가 해제됩니다."), save, editMsg.el);
+      clear(editor).append(form); selectedRole.focus();
+    };
+    const id = h("input", { autocomplete: "off", required: true, minlength: 3, maxlength: 64 });
+    const pw = h("input", { type: "password", autocomplete: "new-password", required: true, minlength: 12, maxlength: 128 });
+    const newRole = roleSelect();
+    const create = h("button", { type: "submit", class: "primary" }, "사용자 생성");
+    const createForm = h("form", { class: "panel form", onsubmit: async (e) => {
+      e.preventDefault(); create.disabled = true;
+      try { await api("/v1/users", { method: "POST", body: JSON.stringify({ username: id.value.trim(), password: pw.value, role: newRole.value }) }); pw.value = ""; await render(); }
+      catch (err) { pw.value = ""; managementMsg.err(errMsg(err)); create.disabled = false; }
+    } }, field("새 사용자 ID", id), field("초기 비밀번호", pw), field("초기 권한", newRole), create, managementMsg.el);
+    const name = h("input", { required: true, maxlength: 100 });
+    const tokenRole = roleSelect("read", true);
+    const owner = h("select", null, h("option", { value: "" }, "사용자 선택"), users.filter((u) => u.active).map((u) => h("option", { value: u.id }, u.username)));
+    tokenRole.addEventListener("change", () => { owner.disabled = tokenRole.value === "ingest"; if (owner.disabled) owner.value = ""; });
+    const hours = h("input", { type: "number", min: 1, max: 720, value: 24, required: true });
+    const issued = h("div");
+    const tokenMsg = msgBox();
+    const tokenRows = h("div");
+    const drawTokens = (rows) => {
+      clear(tokenRows).append(table([
+        { title: "이름", sort: (r) => r.name, render: (r) => r.name },
+        { title: "사용자", render: (r) => (users.find((u) => u.id === r.user_id) || {}).username || "수집기" },
+        { title: "권한", render: (r) => ({ read: "조회", admin: "관리자", ingest: "수집 전용" })[r.role] },
+        { title: "만료", render: (r) => timeEl(new Date(r.expires_at * 1000).toISOString()) },
+        { title: "상태", render: (r) => r.status },
+        { title: "작업", render: (r) => h("button", { type: "button", disabled: r.revoked, onclick: async (e) => {
+          const button = e.currentTarget; button.disabled = true;
+          try { await api(`/v1/tokens/${enc(r.id)}`, { method: "DELETE" }); drawTokens(await api("/v1/tokens")); tokenMsg.ok("토큰을 회수했습니다."); }
+          catch (err) { tokenMsg.err(errMsg(err)); button.disabled = false; }
+        } }, "회수") },
+      ], rows, "발급한 API 토큰이 없습니다."));
+    };
+    drawTokens(tokens);
+    const issue = h("button", { type: "submit", class: "primary" }, "JWT 발급");
+    const issueForm = h("form", { class: "panel form", onsubmit: async (e) => {
+      e.preventDefault(); issue.disabled = true; clear(issued); tokenMsg.clear();
+      try {
+        const d = await api("/v1/tokens", { method: "POST", body: JSON.stringify({ name: name.value.trim(), role: tokenRole.value,
+          user_id: owner.value || null, expires_hours: Number(hours.value) }) });
+        const secret = h("textarea", { readonly: true, "aria-label": "발급된 JWT", rows: 4 }); secret.value = d.access_token;
+        issued.append(h("div", { class: "notice" }, "발급된 JWT는 지금 한 번만 표시됩니다. 복사해 안전하게 보관하세요."), secret);
+        drawTokens(await api("/v1/tokens")); tokenMsg.ok("JWT를 발급했습니다.");
+      } catch (err) { tokenMsg.err(errMsg(err)); }
+      issue.disabled = false;
+    } }, field("토큰 이름", name), field("발급 권한", tokenRole), field("토큰 사용자", owner, "조회·관리 토큰은 사용자 권한 안에서 발급됩니다. 수집 전용은 사용자 없이 발급합니다."),
+      field("유효 시간(시간)", hours, "1~720시간"), issue, tokenMsg.el, issued);
+    page.append(h("h2", null, "사용자 관리"), h("p", { class: "hint" }, "관리자는 조회·관리 권한을 지정하고 계정을 비활성화하거나 비밀번호를 초기화할 수 있습니다. 변경하면 해당 계정의 기존 JWT가 해제됩니다."),
+      table([{ title: "ID", sort: (u) => u.username, render: (u) => u.username }, { title: "권한", render: (u) => u.role === "admin" ? "관리자" : "조회" },
+        { title: "상태", render: (u) => u.active ? "활성" : "비활성" }, { title: "작업", render: (u) => h("button", { type: "button", onclick: () => edit(u) }, "권한·계정 변경") }], users, "등록된 사용자가 없습니다."),
+      editor, h("h3", null, "사용자 추가"), createForm, h("h2", null, "API 토큰(JWT) 발급·회수"), issueForm, tokenRows);
+    return page;
+  }
+
   // ---------- 설정 ----------
   const FAMILY_LABELS = { "*": "* 전체(기본)", debian: "Debian / Ubuntu", rhel: "RHEL 계열", windows: "Windows" };
 
@@ -1650,7 +1761,12 @@
         h("div", { class: "toolbar" }, h("button", { class: "primary", type: "button", onclick: save }, "저장"), h("button", { type: "button", onclick: test }, "연결 테스트"), msg.el)));
   }
 
-  document.getElementById("logout").addEventListener("click", () => logout());
+  document.getElementById("logout").addEventListener("click", async (e) => {
+    e.currentTarget.disabled = true;
+    try { await api("/v1/auth/logout", { method: "POST" }); logout(); }
+    catch (err) { if (err.status !== 401) alert(`로그아웃 실패: ${err.message}. 다시 시도하세요.`); }
+    finally { document.getElementById("logout").disabled = false; }
+  });
   window.addEventListener("hashchange", render);
   render();
 })();

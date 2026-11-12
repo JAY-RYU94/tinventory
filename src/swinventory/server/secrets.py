@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import os
+import base64
+import hashlib
+import hmac
 from pathlib import Path
 from typing import Mapping
 
@@ -19,6 +22,7 @@ class SecretBox:
     def __init__(self, key: bytes | str):
         try:
             self._fernet = Fernet(key)
+            self._key = base64.urlsafe_b64decode(key)
         except (ValueError, TypeError):
             raise SecretError(f"SWINV_SECRET_KEY 는 유효한 Fernet 키여야 한다. 생성: {KEY_HINT}") from None
 
@@ -51,3 +55,8 @@ class SecretBox:
             return self._fernet.decrypt(value[len(PREFIX):].encode("ascii")).decode("utf-8")
         except (InvalidToken, ValueError):
             raise SecretError("복호화에 실패했다 — 비밀 키가 바뀌었거나 값이 손상됐다") from None
+
+
+    def derive_key(self, purpose: bytes) -> bytes:
+        """서명 키는 암호화 키와 용도를 분리해 파생한다. 원본 키는 노출하지 않는다."""
+        return hmac.new(self._key, purpose, hashlib.sha256).digest()

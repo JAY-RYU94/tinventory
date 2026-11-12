@@ -40,7 +40,7 @@ PYTHONPATH=src python3 -m swinventory.server.contract --write   # 계약 스키�
 6. **서버 토큰 비교는 `hmac.compare_digest`**, 모든 후보와 비교(조기 종료 금지). 토큰·Authorization 헤더를 에러·로그에 싣지 않는다.
 7. **전송 오류 분류**: 400/413/422 는 영구 거절(스풀 금지, `rejected` 격리). 401/403/404/429/5xx/네트워크는 재시도(스풀). 리다이렉트는 따라가지 않는다(토큰 유출 방지).
 8. **스풀 순서**: 스풀이 비워지지 않았으면 현재 스냅샷은 항상 맨 뒤. 재전송은 오래된 순.
-9. `server_url` 은 https 만(개발용 `allow_insecure_http`). 토큰 없이 서버를 띄우지 않는다.
+9. `server_url` 은 https 만(개발용 `allow_insecure_http`). 토큰 또는 관리자 계정 없이 서버를 띄우지 않는다.
 10. Debian 컨테이너: `dpkg-query` 가 `exit 1` + "no packages found" 면 실패가 아니라 실행 중 커널만 보고.
 
 ## 테스트 규칙
@@ -59,6 +59,10 @@ PYTHONPATH=src python3 -m swinventory.server.contract --write   # 계약 스키�
 - 소유팀·환경은 수집이 아니라 서버의 자산 메타데이터(`host_tags`)로 관리한다.
 
 ## 서버 기능별 규칙 (정책·AI·화면·운영)
+
+- **계정·JWT**(`server/accounts.py`, `api/accounts.py`): 관리자가 사용자 생성·조회/관리 권한 지정·비활성화·비밀번호 초기화를 담당한다(공개 가입 없음). 비밀번호는 PBKDF2-HMAC-SHA256 600,000회·개별 salt, JWT는 PyJWT의 HS256 고정 알고리즘·issuer/audience/exp/iat/nbf 검증 + DB 토큰 해시·회수·계정 generation 검증을 모두 통과해야 한다. 서명만 검사하는 무상태 JWT로 바꾸지 않는다. 계정 변경은 기존 JWT를 무효화하고, 실제 권한 판정은 서버에서 한다.
+- **인증 동시성**: 로그인 실패 횟수·사용자 변경·토큰 발급/회수는 `repo.auth_lock()`(DB의 단일 행 UPDATE) 안에서 처리한다. Python 락만으로 대체하면 다중 프로세스에서 마지막 관리자가 사라질 수 있다. 계정 관리 뮤테이션은 잠금 안에서도 관리자 권한을 재검증한다. 로그인 실패 예외를 트랜잭션 안에서 던져 실패 횟수를 롤백시키지 않는다.
+- **최초 관리자·서명 키**: `SWINV_ADMIN_USERNAME/PASSWORD`는 사용자 테이블이 비어 있을 때만 생성한다. 재시작으로 비밀번호를 덮어쓰지 않는다. `SWINV_JWT_SECRET` 미설정 시 보존된 SecretBox 키에서 용도를 분리해 파생한다. JWT/비밀번호 원문은 목록·검증 에러·로그에 넣지 않는다. API JWT 원문은 발급 시 한 번만 반환한다. 기존 환경변수 토큰은 별도의 배포 자격증명으로 유지한다.
 
 - **커널 하한선**(`server/policy.py`): OS 계열별 최소 커널, **실행 중 커널 기준**, 숫자 토큰 비교(`5.15.0-91 < 5.15.0-100`). 계열 규칙이 `*` 보다 우선.
   DB 설정(`app_settings`)에 저장하고 요청마다 읽어 **저장 즉시 반영**된다. 정책이 없거나 커널 정보가 없으면 `compliant` 는 `None`(판정 안 함 — False 와 구분한다).

@@ -9,7 +9,7 @@ from fastapi import Header, HTTPException, status
 
 @dataclass(frozen=True)
 class ApiSettings:
-    """역할별 Bearer 토큰. ingest(수집 전용) / read(조회) / admin(조회 + 태그 수정)."""
+    """역할별 기존 Bearer 토큰. ingest(수집 전용) / read(조회) / admin(관리)."""
 
     ingest_tokens: tuple[str, ...] = ()
     read_tokens: tuple[str, ...] = ()
@@ -26,11 +26,12 @@ class ApiSettings:
 
 
 class Authenticator:
-    def __init__(self, settings: ApiSettings):
+    def __init__(self, settings: ApiSettings, accounts=None):
+        self.accounts = accounts
         self._groups = (("ingest", settings.ingest_tokens), ("read", settings.read_tokens),
                         ("admin", settings.admin_tokens))
 
-    def roles_of(self, token: str) -> set[str]:
+    def static_roles_of(self, token: str) -> set[str]:
         """모든 후보와 compare_digest 로 비교한다(일치 시 조기 종료하지 않음)."""
         roles: set[str] = set()
         probe = token.encode()
@@ -41,6 +42,10 @@ class Authenticator:
         if "admin" in roles:
             roles.add("read")
         return roles
+
+    def roles_of(self, token: str) -> set[str]:
+        static = self.static_roles_of(token)
+        return static if static else self.accounts.roles(token) if self.accounts else set()
 
     def _caller_roles(self, authorization: str | None) -> set[str]:
         """Authorization 헤더의 토큰이 가진 역할. 헤더가 없거나 Bearer 형식이 아니거나 모르는 토큰이면 401(토큰은 에러에 싣지 않는다)."""

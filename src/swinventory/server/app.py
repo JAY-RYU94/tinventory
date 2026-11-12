@@ -11,11 +11,16 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.responses import JSONResponse
 
 from swinventory.server.agents import AgentCatalog
 from swinventory.server.ai.config import AiConfigStore
 from swinventory.server.ai.llm import LlmFactory, default_llm_factory
 from swinventory.server.ai.service import ReportService
+from swinventory.server.api import accounts as accounts_api
+from swinventory.server.accounts import Accounts
 from swinventory.server.api import assets as assets_api
 from swinventory.server.api import containers as containers_api
 from swinventory.server.api import enroll as enroll_api
@@ -71,10 +76,20 @@ def create_app(repo: InventoryRepository, settings: ApiSettings,
     policy_store = KernelPolicyStore(repo, clock)
     ai_store = AiConfigStore(repo, box, env, settings.ai_endpoint_allowlist, clock)
     reports = ReportService(repo, ai_store, policy_store.load, llm_factory, clock, settings.stale_after_hours)
-    auth = Authenticator(settings)
+    accounts = Accounts(repo, clock, box, env)
+    auth = Authenticator(settings, accounts)
+    accounts.legacy_roles = auth.static_roles_of
     app = InventoryApp(title="swinventory", version="0.1.0")
     app.max_body_bytes = settings.max_body_bytes
     app.add_middleware(SecurityHeadersMiddleware)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request, exc):
+        # Pydantic 기본 오류의 input 에 로그인 비밀번호·비밀 필드가 반사되지 않게 한다.
+        if request.url.path.startswith(("/v1/auth/", "/v1/users", "/v1/tokens")):
+            return JSONResponse(status_code=422, content={"detail": "입력값의 형식과 길이를 확인하세요."})
+        return await request_validation_exception_handler(request, exc)
+
 
     @app.get("/healthz", tags=["ops"])
     def healthz() -> dict:
@@ -88,6 +103,7 @@ def create_app(repo: InventoryRepository, settings: ApiSettings,
 
     app.include_router(ingest_api.build_router(IngestService(repo, clock), auth.require("ingest")))
     app.include_router(whoami_api.build_router(auth.caller_role()))
+    app.include_router(accounts_api.build_router(accounts, auth.require("read"), auth.require("admin")))
     asset_service = AssetService(repo)
     app.include_router(read_api.build_router(
         repo, auth.require("read"), auth.require("admin"), clock, settings.stale_after_hours, policy_store.load, asset_service))

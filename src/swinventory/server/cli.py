@@ -78,7 +78,7 @@ def main(
 
     try:
         app = create_app_from_env(environ)
-    except SystemExit as exc:  # 토큰 미설정: 인증 없이 기동하지 않는다
+    except (SystemExit, ValueError) as exc:  # 인증 설정 오류: 기본 계정 없이 기동하지 않는다
         print(exc, file=sys.stderr)
         return 2
     kwargs = {"host": args.host or environ.get("SWINV_HOST", "127.0.0.1"),

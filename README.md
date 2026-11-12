@@ -32,12 +32,12 @@ make demo        # http://127.0.0.1:8000  로그인 토큰: demo (조회) / demo
 ### 서버 배포 (Docker + PostgreSQL)
 
 ```bash
-cp .env.example .env       # POSTGRES_PASSWORD, SWINV_INGEST/READ/ADMIN_TOKENS 설정 (openssl rand -hex 32)
+cp .env.example .env       # POSTGRES_PASSWORD, SWINV_INGEST_TOKENS, 최초 관리자 ID/PW 설정
 docker compose up -d --build        # 기본은 127.0.0.1:8000 에만 바인딩
 ```
 
 사내망에 열 때는 `SWINV_BIND=0.0.0.0` 으로 바꾸되 **반드시 TLS 를 종단하는 리버스 프록시 뒤에** 둔다
-(또는 `python -m swinventory.server serve --ssl-certfile … --ssl-keyfile …`). 토큰이 하나도 설정되지 않으면 서버는 기동을 거부한다.
+(또는 `python -m swinventory.server serve --ssl-certfile … --ssl-keyfile …`). 토큰과 관리자 계정이 모두 없으면 서버는 기동을 거부한다.
 
 ### 서버 등록 — Linux·Windows 를 한 줄로
 
@@ -89,6 +89,39 @@ ansible-playbook -i inventory.ini site.yml --ask-vault-pass -e swinv_server_url=
 - 검증: `make ansible-e2e` — ansible-core 컨테이너가 SSH 로 Ubuntu·Rocky 에 배포해 설치·멱등·`--check` 무변경·토큰 비노출(`-vvv`)·해시 불일치 거부·제거를 확인한다.
   **Windows 쪽(`windows.yml`)은 WinRM 대상이 없어 실행하지 못했고 `ansible-lint` 정적 검사까지만 했다.**
 
+
+## ID·비밀번호 로그인과 관리자 권한
+
+화면은 ID·비밀번호 로그인을 기본으로 제공합니다. 관리자는 **계정·권한**에서 사용자를 생성하고 **조회 / 관리자** 권한을 지정하거나 계정을 비활성화하고 비밀번호를 초기화합니다. 일반 사용자는 조회와 본인 비밀번호 변경만 가능합니다. 공개 회원가입은 없습니다. 기존 조회·관리 토큰 로그인은 로그인 화면의 **JWT·기존 토큰으로 로그인**을 펼쳐 사용합니다. 수집 전용 토큰은 화면 로그인에 사용할 수 없습니다.
+
+최초 관리자 계정은 `.env`에 아래 **두 값을 함께** 입력하고 서버를 시작하면 생성됩니다. 기본 ID·비밀번호는 없으며, 사용자 테이블이 비어 있을 때만 생성합니다.
+
+```dotenv
+SWINV_ADMIN_USERNAME=admin
+SWINV_ADMIN_PASSWORD=직접_정한_12자_이상_비밀번호
+```
+
+관리자 생성 후 위 환경변수를 제거해도 계정은 DB에 유지됩니다. 재시작으로 비밀번호를 덮어쓰지 않습니다. 이후 계정과 권한은 관리자 화면에서 관리합니다. 기존 DB는 시작할 때 사용자·토큰 테이블만 추가하며 인벤토리 데이터는 유지합니다. `.env`와 키 파일은 커밋하지 않습니다. 운영 환경은 TLS 종단 뒤에 두세요.
+
+- 비밀번호: 12~128자, 임의 salt와 PBKDF2-HMAC-SHA256 600,000회로 단방향 저장([OWASP 기준](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)). 계정 로그인 5회 실패 시 15분 잠금, 연결 IP당 15분에 30회까지 시도할 수 있습니다.
+- 로그인 JWT: HS256 서명, 8시간 만료. 서버는 서명·발급자·대상·발급/만료 시각과 DB 회수 상태를 함께 검증합니다. 브라우저는 JWT를 `sessionStorage`에 보관하며, 비밀번호는 저장하지 않습니다. 로그아웃은 사용한 JWT를 서버에서도 회수합니다.
+- 계정 권한·활성 상태·비밀번호 변경: 해당 사용자의 기존 로그인 JWT와 API JWT가 다음 요청부터 무효화됩니다. 마지막 활성 관리자의 권한 하향·비활성화는 거부합니다.
+- API JWT: 관리자가 **조회 / 관리자 / 수집 전용** 권한과 1~720시간의 유효 기간을 지정해 발급·회수합니다. 조회·관리 토큰은 활성 사용자를 선택하고 그 사용자 권한 안에서 발급합니다. 수집 전용은 사용자 없이 발급하며 `/v1/ingest`에만 사용합니다. JWT 원문은 발급 응답에서 한 번만 표시하고 DB에는 해시만 저장합니다. 회수해도 인벤토리는 삭제하지 않습니다.
+- 서명 키: 선택 설정 `SWINV_JWT_SECRET`은 32바이트 이상의 난수입니다. 미설정 시 기존 `SWINV_SECRET_FILE`의 암호화 키에서 용도를 분리해 파생합니다. Docker는 `/data/secret.key`를 볼륨에 보존합니다. 키가 바뀌면 기존 JWT는 사용할 수 없습니다. 여러 서버 인스턴스는 같은 DB와 키를 사용하세요.
+- 기존 `SWINV_INGEST_TOKENS`·`SWINV_READ_TOKENS`·`SWINV_ADMIN_TOKENS`도 유지합니다. 계정 관리와 별개인 배포 자격증명이므로 제거·회전은 환경변수에서 수행합니다. 수집 전용 JWT는 에이전트 `token` 설정에 넣을 수 있으며 만료 전 재발급해야 합니다.
+
+| 메서드 | 경로 | 권한·동작 |
+|---|---|---|
+| POST | `/v1/auth/login` | `{username,password}` → `{access_token,token_type,expires_in,expires_at,role,id}` |
+| GET | `/v1/auth/me` | 조회 이상. 현재 계정 ID와 로그인 종류 |
+| POST | `/v1/auth/logout` | 조회 이상. 사용한 JWT 회수 |
+| POST | `/v1/auth/password` | 계정 로그인. `{current_password,new_password}` → 모든 기존 JWT 무효화 |
+| GET, POST | `/v1/users` | 관리자. 사용자 조회 / `{username,password,role}` 생성 |
+| PATCH | `/v1/users/{id}` | 관리자. `{role?,active?,password?}` 변경 |
+| GET, POST | `/v1/tokens` | 관리자. API JWT 목록 / `{name,role,user_id?,expires_hours}` 발급 |
+| DELETE | `/v1/tokens/{id}` | 관리자. JWT 회수 |
+
+
 ## Windows 에이전트 (C#)
 
 `windows-agent/` — .NET 10, **표준 라이브러리(BCL)만 사용**(NuGet 의존성 0), self-contained 단일 `swinventory-agent.exe`(≈12MB, 트리밍). 대상 서버에 .NET 설치가 필요 없다.
@@ -119,7 +152,7 @@ swinventory-agent doctor --config "$env:ProgramData\swinventory\agent.json"     
 
 ## 화면
 
-`/` (로그인: 조회 토큰, 탭을 닫으면 지워짐). 빌드 없는 정적 파일을 서버가 직접 서빙한다.
+`/` (ID·비밀번호 로그인 또는 JWT·기존 토큰 접속, 탭을 닫으면 JWT가 지워짐). 빌드 없는 정적 파일을 서버가 직접 서빙한다.
 
 | 화면 | 내용 |
 |---|---|

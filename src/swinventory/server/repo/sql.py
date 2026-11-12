@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections import defaultdict
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -45,8 +46,16 @@ def _escape_like(text: str) -> str:
 class SqlInventoryRepository(InventoryRepository):
     def __init__(self, engine: Engine):
         self._engine = engine
+        self._auth_thread_lock = threading.RLock()
         self._tx: ContextVar[Connection | None] = ContextVar(f"inventory_tx_{id(self)}", default=None)
         S.metadata.create_all(engine)
+        # 첫 행 생성도 여러 프로세스에서 멱등이다. 아래 UPDATE 가 DB 간 공통 쓰기 잠금이다.
+        if engine.dialect.name == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert as guard_insert
+        else:
+            from sqlalchemy.dialects.sqlite import insert as guard_insert
+        with engine.begin() as c:
+            c.execute(guard_insert(S.auth_guard).values(id=1, revision=0).on_conflict_do_nothing())
 
     @classmethod
     def from_url(cls, url: str) -> "SqlInventoryRepository":
@@ -607,3 +616,67 @@ class SqlInventoryRepository(InventoryRepository):
     def delete_asset(self, asset_id: int) -> bool:
         with self.transaction(), self._conn(write=True) as c:
             return c.execute(delete(S.assets).where(S.assets.c.id == asset_id)).rowcount > 0
+
+
+    @contextmanager
+    def auth_lock(self):
+        """계정 변경·최종 관리자 보호·세션 발급을 하나의 DB 직렬화 경계로 묶는다."""
+        with self._auth_thread_lock, self.transaction():
+            with self._conn(write=True) as c:
+                c.execute(update(S.auth_guard).where(S.auth_guard.c.id == 1).values(revision=S.auth_guard.c.revision + 1))
+            yield
+
+    def get_user(self, key: str, *, by_name: bool = False) -> dict[str, Any] | None:
+        col = S.users.c.username if by_name else S.users.c.id
+        with self._conn() as c:
+            row = c.execute(select(S.users).where(col == key)).mappings().first()
+            return dict(row) if row else None
+
+    def list_users(self) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            cols = [v for v in S.users.c if v.name not in {"password_hash", "failed_logins", "locked_until"}]
+            return [dict(row) for row in c.execute(select(*cols).order_by(S.users.c.username)).mappings()]
+
+    def create_user(self, values: dict[str, Any]) -> None:
+        with self._conn(write=True) as c:
+            c.execute(insert(S.users).values(**values))
+
+    def update_user(self, user_id: str, values: dict[str, Any]) -> None:
+        with self._conn(write=True) as c:
+            c.execute(update(S.users).where(S.users.c.id == user_id).values(**values))
+
+    def add_token(self, values: dict[str, Any]) -> None:
+        with self._conn(write=True) as c:
+            c.execute(insert(S.access_tokens).values(**values))
+
+    def find_token(self, digest: str) -> dict[str, Any] | None:
+        with self._conn() as c:
+            # 계정의 세대·활성·역할도 동일한 SELECT 스냅샷에서 읽는다.
+            t, u = S.access_tokens, S.users
+            row = c.execute(select(t, u.c.active.label("user_active"), u.c.generation.label("user_generation"),
+                u.c.role.label("user_role"), u.c.username).select_from(t.outerjoin(u, t.c.user_id == u.c.id))
+                .where(t.c.token_hash == digest)).mappings().first()
+            return dict(row) if row else None
+
+    def list_tokens(self) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            cols = [v for v in S.access_tokens.c if v.name != "token_hash"]
+            return [dict(row) for row in c.execute(select(*cols).where(S.access_tokens.c.kind == "api")
+                .order_by(S.access_tokens.c.created_at.desc())).mappings()]
+
+    def revoke_token(self, token_id: str) -> bool:
+        with self._conn(write=True) as c:
+            return c.execute(update(S.access_tokens).where(S.access_tokens.c.id == token_id).values(revoked=True)).rowcount > 0
+
+    def login_attempt(self, key: str, now: int) -> int:
+        """프록시 헤더 대신 연결 IP 의 해시로 15분 창을 센다. 만료 행은 같이 정리한다."""
+        with self._conn(write=True) as c:
+            c.execute(delete(S.login_attempts).where(S.login_attempts.c.started_at <= now - 900))
+            row = c.execute(select(S.login_attempts).where(S.login_attempts.c.key == key)).mappings().first()
+            if row:
+                count = row["count"] + 1
+                c.execute(update(S.login_attempts).where(S.login_attempts.c.key == key).values(count=count))
+            else:
+                count = 1
+                c.execute(insert(S.login_attempts).values(key=key, started_at=now, count=count))
+            return count

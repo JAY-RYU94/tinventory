@@ -43,7 +43,7 @@ from swinventory.server.services.ingest import IngestService  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WEB = Path(server_app.WEB_DIR)   # 서버가 서빙하는 정적 파일 디렉터리 — 소스 단언도 같은 곳을 읽는다
-ADMIN_ONLY = "관리자 토큰으로 로그인해야 합니다"
+ADMIN_ONLY = "관리자 권한으로 로그인해야 합니다"
 CLUSTER_A = "a1" * 32
 BIG_HOST = "b" * 32
 RD, ADM, ING = "rd", "adm", "ing"
@@ -52,7 +52,7 @@ RD, ADM, ING = "rd", "adm", "ing"
 STATIC_ROUTES = [
     "#/overview", "#/kernels", "#/software", "#/software/openssl", "#/hosts", "#/assets", "#/assets/new", "#/containers",
     "#/containers/images", "#/containers/list", "#/events", "#/network", "#/network/ports", "#/network/ports/tcp/22",
-    "#/reports", "#/reports/facts", "#/enroll", "#/settings",
+    "#/reports", "#/reports/facts", "#/enroll", "#/settings", "#/accounts",
 ]
 
 
@@ -147,8 +147,8 @@ def site(tmp_path_factory):
     full_agents.mkdir()
     for name in ("swinventory-agent.pyz", "install.sh", "swinventory-agent-win-x64.exe", "install.ps1"):
         (full_agents / name).write_bytes(b"x" * 64)
-    s1, t1, base = _serve(create_app(repo, settings, env={}, agent_dir=empty_agents))
-    s2, t2, base2 = _serve(create_app(repo, settings, env={}, agent_dir=full_agents))
+    s1, t1, base = _serve(create_app(repo, settings, env={"SWINV_JWT_SECRET": "ui-test-secret-" + "x" * 48}, agent_dir=empty_agents))
+    s2, t2, base2 = _serve(create_app(repo, settings, env={"SWINV_JWT_SECRET": "ui-test-secret-" + "x" * 48}, agent_dir=full_agents))
 
     unreg = call(base, "/v1/assets?status=unregistered")
     unknown = next(r for r in unreg if r["kind"] == "unknown" and r["host_id"] != BIG_HOST)
@@ -270,35 +270,39 @@ def hash_query(page) -> dict[str, list[str]]:
 def test_login_distinguishes_invalid_ingest_only_and_unreachable(site, make_page):
     page = make_page(token=None)
     page.goto(site.base + "/")
+    page.locator("details.token-login > summary").click()
     box = page.get_by_label("토큰")
     expect(box).to_be_visible()
     expect(box).to_have_attribute("placeholder", "조회 토큰 또는 관리자 토큰")
 
     def attempt(token: str) -> None:
+        if not page.get_by_label("토큰").is_visible():
+            page.locator("details.token-login > summary").click()
         page.get_by_label("토큰").fill(token)
-        page.get_by_role("button", name="로그인").click()
+        page.get_by_role("button", name="토큰으로 접속").click()
 
     attempt("wrong-token")
-    expect(page.get_by_role("alert")).to_have_text("토큰이 올바르지 않습니다.")
+    expect(page.locator(".login > .error")).to_have_text("토큰이 올바르지 않습니다.")
     attempt("틀린-토큰")      # 한글은 헤더에 못 실린다 — fetch 예외를 '서버 연결 실패'로 오해하면 안 된다
-    expect(page.get_by_role("alert")).to_have_text("토큰이 올바르지 않습니다.")
+    expect(page.locator(".login > .error")).to_have_text("토큰이 올바르지 않습니다.")
     attempt(ING)
-    expect(page.get_by_role("alert")).to_have_text("이 토큰으로는 조회할 수 없습니다(수집 전용).")
+    expect(page.locator(".login > .error")).to_have_text("이 토큰으로는 조회할 수 없습니다(수집 전용).")
     page.route("**/v1/whoami", lambda route: route.abort())           # 네트워크 단절
     attempt(RD)
-    expect(page.get_by_role("alert")).to_have_text("서버에 연결할 수 없습니다(잠시 후 다시 시도).")
+    expect(page.locator(".login > .error")).to_have_text("서버에 연결할 수 없습니다(잠시 후 다시 시도).")
     page.unroute("**/v1/whoami")
     page.route("**/v1/whoami", lambda route: route.fulfill(status=503, body="down"))     # 5xx
     attempt(RD)
-    expect(page.get_by_role("alert")).to_have_text("서버에 연결할 수 없습니다(잠시 후 다시 시도).")
+    expect(page.locator(".login > .error")).to_have_text("서버에 연결할 수 없습니다(잠시 후 다시 시도).")
 
 
 @pytest.mark.parametrize("token, label", [(ADM, "관리자"), (RD, "조회 전용")])
 def test_role_badge_shows_after_login_and_after_reload(site, make_page, token, label):
     page = make_page(token=None)
     page.goto(site.base + "/")
+    page.locator("details.token-login > summary").click()
     page.get_by_label("토큰").fill(token)
-    page.get_by_role("button", name="로그인").click()
+    page.get_by_role("button", name="토큰으로 접속").click()
     expect(page.locator("#role")).to_have_text(label)
     expect(page.locator("#app h1").first).to_be_visible()
     page.reload()                                                         # 저장된 토큰으로 다시 열어도 whoami 로 역할을 안다
@@ -427,7 +431,7 @@ def test_mobile_header_nav_is_one_scrollable_row_and_logout_stays_reachable(site
     logout = page.get_by_role("button", name="로그아웃").bounding_box()
     assert logout and 0 <= logout["x"] and logout["x"] + logout["width"] <= 390, logout
     page.get_by_role("button", name="로그아웃").click()
-    expect(page.get_by_label("토큰")).to_be_visible()
+    expect(page.get_by_label("ID", exact=True)).to_be_visible()
 
 
 def test_mobile_layouts_collapse_and_tables_scroll_inside_their_container(site, make_page):
@@ -1069,8 +1073,9 @@ def test_after_logging_in_again_the_heading_gets_focus_even_for_the_screen_left_
     page = make_page()
     open_route(page, site.base, "#/hosts")
     page.get_by_role("button", name="로그아웃").click()
+    page.locator("details.token-login > summary").click()
     page.get_by_label("토큰").fill(ADM)
-    page.get_by_role("button", name="로그인").click()
+    page.get_by_role("button", name="토큰으로 접속").click()
     expect(page.locator("#app h1").first).to_have_text(re.compile(r"호스트 \("))
     expect(page.locator("#app h1").first).to_be_focused()
 
@@ -1533,8 +1538,8 @@ def test_a_network_failure_on_a_screen_offers_retry_and_a_401_returns_to_login(s
     # 세션 중 토큰이 거부되면(회수·만료) 로그인 화면으로 돌아가 이유를 알린다
     page.route("**/v1/hosts*", lambda r: r.fulfill(status=401, json={"detail": "invalid token"}))
     page.get_by_role("navigation", name="주 메뉴").get_by_role("link", name="호스트", exact=True).click()
-    expect(page.get_by_label("토큰")).to_be_visible()
-    expect(page.get_by_role("alert")).to_contain_text("토큰이 올바르지 않거나 만료되었습니다")
+    expect(page.get_by_label("ID", exact=True)).to_be_visible()
+    expect(page.locator(".login > .error")).to_contain_text("토큰이 올바르지 않거나 만료되었습니다")
     assert page.evaluate("() => sessionStorage.getItem('swinv.token')") is None         # 거부된 토큰은 지운다
     expect(page.locator("#top")).to_be_hidden()
 
@@ -1630,3 +1635,93 @@ def test_software_loads_only_expanded_server_and_unknown_filter_stays_scoped(sit
         expect(page.locator('details.server-group')).to_have_count(0)
         expect(page.get_by_text('조건에 맞는 서버 데이터가 없습니다.')).to_be_visible()
     assert page.problems == []
+
+
+def test_id_password_login_change_password_and_server_logout(site, make_page):
+    username, password = 'ui-personal', 'ui-password-1234'
+    call(site.base, '/v1/users', method='POST', body={'username':username,'password':password,'role':'read'})
+    page = make_page(token=None, width=390)
+    page.goto(site.base + '/#/accounts')
+    expect(page.get_by_label('ID',exact=True)).to_be_visible()
+    expect(page.get_by_label('비밀번호',exact=True)).to_have_attribute('autocomplete','current-password')
+    page.get_by_label('ID',exact=True).fill(username)
+    page.get_by_label('비밀번호',exact=True).fill(password)
+    page.get_by_role('button',name='로그인',exact=True).click()
+    expect(page.locator('#role')).to_be_visible()
+    expect(page.locator('#role')).to_have_text('조회 전용')
+    expect(page.get_by_role('heading',name='내 비밀번호 변경')).to_be_visible()
+    assert page.get_by_role('heading',name='사용자 관리',exact=True).count() == 0
+    old=page.evaluate("sessionStorage.getItem('swinv.token')")
+    assert old.count('.')==2
+    page.get_by_label('현재 비밀번호',exact=True).fill(password)
+    page.get_by_label('새 비밀번호',exact=True).fill('ui-changed-password-123')
+    page.get_by_role('button',name='비밀번호 변경',exact=True).click()
+    expect(page.get_by_label('ID',exact=True)).to_be_visible()
+    assert page.request.get(site.base+'/v1/hosts',headers={'Authorization':'Bearer '+old}).status==401
+    page.get_by_label('ID',exact=True).fill(username)
+    page.get_by_label('비밀번호',exact=True).fill('ui-changed-password-123')
+    page.get_by_role('button',name='로그인',exact=True).click()
+    expect(page.locator('#role')).to_be_visible()
+    expect(page.locator('#role')).to_have_text('조회 전용')
+    current=page.evaluate("sessionStorage.getItem('swinv.token')")
+    page.get_by_role('button',name='로그아웃',exact=True).click()
+    expect(page.get_by_label('ID',exact=True)).to_be_visible()
+    assert page.request.get(site.base+'/v1/hosts',headers={'Authorization':'Bearer '+current}).status==401
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+
+
+@pytest.mark.parametrize('width',[390,1360])
+def test_admin_assigns_permissions_and_issues_and_revokes_jwt(site,make_page,width):
+    username=f'ui-managed-{width}'
+    password='ui-password-1234'
+    page=make_page(width=width)
+    open_route(page,site.base,'#/accounts')
+    page.get_by_label('새 사용자 ID',exact=True).fill(username)
+    page.get_by_label('초기 비밀번호',exact=True).fill(password)
+    page.get_by_role('button',name='사용자 생성',exact=True).click()
+    row=page.locator('tr').filter(has=page.get_by_role('cell',name=username,exact=True)).first
+    expect(row).to_be_visible()
+    row.get_by_role('button',name='권한·계정 변경').click()
+    page.get_by_label('사용자 권한',exact=True).select_option('admin')
+    page.get_by_role('button',name='변경 적용',exact=True).click()
+    expect(row.get_by_role('cell',name='관리자',exact=True)).to_be_visible()
+    user=next(u for u in call(site.base,'/v1/users') if u['username']==username)
+    name='<img src=x onerror=alert(1)> '+str(width)
+    page.get_by_label('토큰 이름',exact=True).fill(name)
+    page.get_by_label('토큰 사용자',exact=True).select_option(user['id'])
+    page.get_by_label('유효 시간(시간)',exact=True).fill('1')
+    page.get_by_role('button',name='JWT 발급',exact=True).click()
+    jwt_box=page.get_by_label('발급된 JWT',exact=True)
+    expect(jwt_box).to_be_visible()
+    token=jwt_box.input_value()
+    assert token.count('.')==2
+    assert page.request.get(site.base+'/v1/hosts',headers={'Authorization':'Bearer '+token}).status==200
+    token_row=page.locator('tr').filter(has=page.get_by_role('cell',name=name,exact=True)).first
+    expect(token_row).to_be_visible()
+    token_row.get_by_role('button',name='회수',exact=True).click()
+    expect(token_row.get_by_role('cell',name='회수됨',exact=True)).to_be_visible()
+    assert page.request.get(site.base+'/v1/hosts',headers={'Authorization':'Bearer '+token}).status==401
+    assert page.locator('#app img').count()==0
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.reload()
+    expect(page.get_by_role('heading',name='API 토큰(JWT) 발급·회수',exact=True)).to_be_visible()
+    expect(page.get_by_label('발급된 JWT',exact=True)).to_have_count(0)
+    assert token not in page.locator('#app').inner_text()
+    assert page.problems==[]
+
+
+def test_jwt_revocation_failure_can_be_retried(site,make_page):
+    created=call(site.base,'/v1/tokens',method='POST',body={'name':'ui-retry','role':'ingest','expires_hours':1})
+    page=make_page()
+    open_route(page,site.base,'#/accounts')
+    row=page.locator('tr').filter(has=page.get_by_role('cell',name='ui-retry',exact=True)).first
+    button=row.get_by_role('button',name='회수',exact=True)
+    pattern='**/v1/tokens/'+created['id']
+    page.route(pattern,lambda route:route.fulfill(status=503,json={'detail':'일시적 실패'}))
+    button.click()
+    expect(page.get_by_role('alert').filter(has_text='일시적 실패')).to_be_visible()
+    expect(button).to_be_enabled()
+    page.unroute(pattern)
+    button.click()
+    expect(row.get_by_role('cell',name='회수됨',exact=True)).to_be_visible()
+    assert not any(p.startswith('pageerror:') for p in page.problems)

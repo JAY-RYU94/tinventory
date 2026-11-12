@@ -180,3 +180,7 @@ td.asset, td.os { min-width: 11em; }
 .inventory-section { margin: 18px 0; min-width: 0; }
 .inventory-section > summary h2 { display: inline; margin: 0; }
 .inventory-section > summary { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px; }
+
+.token-login { margin-top: 20px; }
+.token-login > summary { cursor: pointer; padding: 10px 0; }
+.token-login form { margin-top: 10px; }

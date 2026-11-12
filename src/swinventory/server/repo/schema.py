@@ -212,3 +212,22 @@ host_k8s = Table(
     Column("updated_at", _TS, nullable=False),
 )
 Index("ix_host_k8s_cluster", host_k8s.c.cluster_id)
+
+
+# 사용자 비밀번호는 단방향 해시, 발급 JWT 는 원문 없이 SHA-256 과 회수 상태만 보관한다.
+auth_guard = Table("auth_guard", metadata, Column("id", Integer, primary_key=True), Column("revision", Integer, nullable=False))
+users = Table("users", metadata,
+    Column("id", String(32), primary_key=True), Column("username", String(64), nullable=False, unique=True),
+    Column("password_hash", Text, nullable=False), Column("role", String(16), nullable=False),
+    Column("active", Boolean, nullable=False), Column("generation", Integer, nullable=False),
+    Column("failed_logins", Integer, nullable=False), Column("locked_until", Integer, nullable=False),
+    Column("created_at", _TS, nullable=False))
+access_tokens = Table("access_tokens", metadata,
+    Column("id", String(32), primary_key=True), Column("token_hash", String(64), nullable=False, unique=True),
+    Column("user_id", String(32), ForeignKey("users.id"), nullable=True),
+    Column("generation", Integer, nullable=False), Column("name", String(100), nullable=False),
+    Column("role", String(16), nullable=False), Column("kind", String(16), nullable=False),
+    Column("created_at", _TS, nullable=False), Column("expires_at", Integer, nullable=False),
+    Column("revoked", Boolean, nullable=False))
+login_attempts = Table("login_attempts", metadata,
+    Column("key", String(64), primary_key=True), Column("started_at", Integer, nullable=False), Column("count", Integer, nullable=False))
