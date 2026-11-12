@@ -125,3 +125,32 @@ def test_rpm_multi_version_visible_in_software_detail(client):
                                packages=[rpm("kernel-core", "5.14-362"), rpm("kernel-core", "5.14-427")]))
     d = client.get("/v1/software/kernel-core", headers=RD).json()
     assert {v["version"] for v in d["versions"]} == {"5.14-362", "5.14-427"}
+
+
+def test_software_server_summary_and_detail_scope(client):
+    seed(client)
+    response = client.get('/v1/software-hosts', params={'q': 'open', 'host': 'a'}, headers=RD)
+    assert response.status_code == 200
+    rows = response.json()
+    assert len(rows) == 1 and rows[0]['host_id'] == 'a' and rows[0]['package_count'] == 1
+    assert client.get('/v1/software-hosts', params={'host': 'missing'}, headers=RD).json() == []
+    assert client.get('/v1/software-hosts', params={'q': '%'}, headers=RD).json() == []
+    detail = client.get('/v1/software/openssl', params={'host': 'b'}, headers=RD).json()
+    assert detail['hosts'] and {row['host_id'] for row in detail['hosts']} == {'b'}
+    assert detail['versions'] == [{'version': '3.0.13', 'host_count': 1}]
+    exported = client.get('/v1/software/openssl', params={'host': 'b', 'format': 'csv'}, headers=RD).text
+    assert 'web02' in exported and 'web01' not in exported
+
+
+def test_software_summary_keeps_duplicate_server_names_and_multiple_versions(client):
+    for host in ('a', 'b'):
+        assert push(client, make_snapshot(host_id=host, hostname='same-name', sources=('rpm', 'dpkg'), packages=[
+            rpm('kernel-core', '1.0'), rpm('kernel-core', '2.0'), dpkg('bash', '5.1')])).status_code == 200
+    rows = client.get('/v1/software-hosts', params={'q': 'kernel'}, headers=RD).json()
+    assert {r['host_id'] for r in rows} == {'a', 'b'}
+    assert len(rows) == 2 and all(r['package_count'] == 2 for r in rows)
+    assert all('packages' not in r for r in rows)
+    scoped = client.get('/v1/software/kernel-core', params={'host': 'b', 'below': '2.0'}, headers=RD).json()
+    assert [r['version'] for r in scoped['hosts']] == ['1.0']
+    assert {r['host_id'] for r in scoped['hosts']} == {'b'}
+    assert scoped['versions'] == [{'version': '2.0', 'host_count': 1}, {'version': '1.0', 'host_count': 1}]

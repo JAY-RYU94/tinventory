@@ -231,10 +231,21 @@ def settle(page) -> None:
     expect(page.locator(READY).first).to_be_visible()
 
 
-def open_route(page, base: str, route: str) -> None:
+def open_route(page, base: str, route: str, *, expand_inventory: bool = True) -> None:
     """매번 새 문서로 연다(?v=N) — 해시만 바꾸면 이전 화면이 남아 '그려졌다' 신호가 거짓이 된다."""
     page.goto(f"{base}/?v={next(_seq)}{route}")
     settle(page)
+    if expand_inventory:
+        expand_groups(page)
+
+
+def expand_groups(page):
+    """기존 표 동작 검사는 사용자가 요약을 펼친 후 진행한다."""
+    for details in page.locator("details.server-group, details.inventory-section").all():
+        if details.get_attribute("open") is None:
+            details.locator(":scope > summary").click()
+    for body in page.locator(".server-group-body").all():
+        expect(body.locator("table, .empty, .error").first).to_be_visible()
 
 
 def all_routes(site: Site) -> list[str]:
@@ -443,10 +454,10 @@ def test_mobile_layouts_collapse_and_tables_scroll_inside_their_container(site, 
     assert narrow >= 40, narrow
     cols = scroll.locator("thead th").count()
     assert page.locator(".scroll table").first.evaluate("el => getComputedStyle(el).minWidth") == f"{cols * 104}px"   # 열 수에 비례한 바닥
-    open_route(page, site.base, "#/software?q=open")                 # 열이 셋뿐인 표는 억지로 가로 스크롤하지 않는다
-    expect(page.locator(".scroll table")).to_be_visible()
-    assert page.locator(".scroll table").evaluate("el => getComputedStyle(el).minWidth") == "312px"
-    assert page.locator(".scroll").evaluate("el => el.scrollWidth <= el.clientWidth")
+    open_route(page, site.base, "#/software?q=open")                 # 서버의 패키지 표는 열 수에 맞는 최소 폭을 유지한다
+    expect(page.locator(".scroll table").first).to_be_visible()
+    assert page.locator(".scroll table").first.evaluate("el => getComputedStyle(el).minWidth") == "416px"
+    assert page.locator(".scroll").first.evaluate("el => el.scrollWidth > el.clientWidth")
 
 
 # --------------------------------------------------------------------------- C. 표
@@ -520,9 +531,9 @@ def test_blank_values_sort_last_in_both_directions_and_count_columns_start_desce
         assert values[-1] == "-" and values.count("-") >= 1, (direction, values[-3:])     # 빈 값은 방향과 상관없이 맨 뒤
         first_blank = values.index("-")
         assert set(values[first_blank:]) == {"-"}, (direction, values)
-    # 개수·시각처럼 '큰 쪽이 궁금한' 열은 첫 클릭이 내림차순이다
-    open_route(page, site.base, "#/software?q=o")
-    count_col = page.locator("thead th", has_text="설치 호스트").first
+    # 개수 열의 첫 클릭은 내림차순이다.
+    open_route(page, site.base, "#/containers/images")
+    count_col = page.locator("thead th").filter(has_text=re.compile("^호스트")).first
     count_col.get_by_role("button").click()
     expect(count_col).to_have_attribute("aria-sort", "descending")
     counts = [int(c) for c in page.locator("tbody tr td:nth-child(2)").all_inner_texts()]
@@ -699,6 +710,7 @@ def test_csv_buttons_export_exactly_what_the_screen_filters(site, make_page):
     settle(page)
     expect(page.get_by_label("충돌만")).to_be_checked()
     expect(page.get_by_label("IP·MAC 검색")).to_have_value("10.20")
+    expand_groups(page)
     rows = page.locator("tbody tr")
     assert rows.count() >= 2
     assert all("충돌" in t for t in rows.locator("td:last-child").all_inner_texts())    # 충돌 행만 남았다
@@ -739,6 +751,8 @@ def test_version_bar_click_filters_the_host_list_and_chip_removes_it(site, make_
     bar_count = int(bar.locator(".n").inner_text())
     assert 0 < bar_count < total
     bar.click()
+    expect(page.get_by_role("heading", name=f"설치 호스트 ({bar_count})")).to_be_visible()
+    expand_groups(page)
     expect(page.get_by_role("button", name=re.compile("^3\\.0\\.2 ")).first).to_have_attribute("aria-pressed", "true")
     assert hash_query(page) == {"version": ["3.0.2"]}
     rows = page.locator("tbody tr")
@@ -753,12 +767,16 @@ def test_version_bar_click_filters_the_host_list_and_chip_removes_it(site, make_
     chip = page.locator(".chip", has_text="버전 = 3.0.2")
     expect(chip).to_be_visible()
     chip.get_by_role("button", name=re.compile("필터 해제")).click()
+    expect(chip).to_have_count(0)
+    expand_groups(page)
     expect(page.locator("tbody tr")).to_have_count(total)
     assert hash_query(page) == {}
 
     # '이 버전 미만'
     page.get_by_label("이 버전 미만").fill("3.0.11")
     page.get_by_label("이 버전 미만").press("Enter")
+    expect(page.locator(".chip", has_text=page.get_by_label("이 버전 미만").input_value() + " 미만")).to_be_visible()
+    expand_groups(page)
     assert hash_query(page) == {"below": ["3.0.11"]}
     expect(page.locator(".chip", has_text="3.0.11 미만")).to_be_visible()
     versions = set(page.locator("tbody tr td:nth-child(4)").all_inner_texts())
@@ -766,7 +784,9 @@ def test_version_bar_click_filters_the_host_list_and_chip_removes_it(site, make_
     assert csv_query(page)["below"] == ["3.0.11"]
     page.get_by_label("이 버전 미만").fill("0.1")                      # 일치하는 호스트가 없으면 404 가 아니라 빈 상태
     page.get_by_label("이 버전 미만").press("Enter")
-    expect(page.get_by_text("조건에 맞는 호스트가 없습니다.")).to_be_visible()
+    expect(page.locator(".chip", has_text=page.get_by_label("이 버전 미만").input_value() + " 미만")).to_be_visible()
+    expand_groups(page)
+    expect(page.get_by_text("조건에 맞는 서버 데이터가 없습니다.")).to_be_visible()
     expect(page.get_by_role("heading", name="설치 호스트 (0)")).to_be_visible()
     assert page.locator(".bars .bar").count() >= 3                    # 분포는 그대로
     assert page.problems == []
@@ -779,6 +799,8 @@ def test_image_tag_links_and_cluster_scope_carry_through(site, make_page):
     tag = page.get_by_role("link", name=re.compile("^1\\.25 ×")).first
     expect(tag).to_have_attribute("href", re.compile(r"#/containers/list\?image=nginx%3A1\.25&active=1"))
     tag.click()
+    settle(page)
+    expand_groups(page)
     expect(page.locator(".chip", has_text="이미지: nginx:1.25")).to_be_visible()
     images = page.locator("tbody tr td:nth-child(7)").all_inner_texts()               # 이미지 열(호스트·자산번호·구분·클러스터·파드·컨테이너 다음)
     assert images and all("nginx:1.25" in i for i in images), images
@@ -792,6 +814,8 @@ def test_image_tag_links_and_cluster_scope_carry_through(site, make_page):
     tag_in_cluster = page.get_by_role("link", name=re.compile("^1\\.2[56] ×")).first
     expect(tag_in_cluster).to_have_attribute("href", re.compile(f"cluster={CLUSTER_A}"))
     repo_link.click()
+    settle(page)
+    expand_groups(page)
     chip = page.locator(".chip", has_text="클러스터: a1a1a1a1")
     expect(chip).to_be_visible()
     scoped = page.locator("tbody tr").count()
@@ -803,6 +827,8 @@ def test_image_tag_links_and_cluster_scope_carry_through(site, make_page):
     page.go_back()
     expect(chip).to_be_visible()
     chip.get_by_role("button", name=re.compile("필터 해제")).click()
+    expect(chip).to_have_count(0)
+    expand_groups(page)
     expect(page.locator(".chip")).to_have_count(0)
     assert hash_query(page) == {}
     assert page.locator("tbody tr").count() > scoped and len(scoped_hosts) >= 1          # 범위를 해제하면 다른 클러스터·도커 서버도 보인다
@@ -1528,4 +1554,79 @@ def test_traversing_every_screen_with_both_tokens_raises_no_console_errors_or_li
     page.goto(f"{site.base_with_agents}/?v={next(_seq)}#/enroll")
     expect(page.locator(".enroll-grid")).to_be_visible()
     assert not re.search(r"(^|\s)null(\s|$)", page.locator("#app").inner_text())
+    assert page.problems == []
+
+
+@pytest.mark.parametrize('width', [390, 1360])
+@pytest.mark.parametrize('route', ['#/containers/list', '#/network', '#/network/ports', '#/software?q=open'])
+def test_inventory_groups_belong_to_servers_start_closed_and_filter_by_id(site, make_page, route, width):
+    page = make_page(token=RD, width=width)
+    open_route(page, site.base, route, expand_inventory=False)
+    groups = page.locator('details.server-group')
+    expect(groups.first).to_be_visible()
+    total = groups.count()
+    assert total > 1
+    assert page.locator('details.server-group[open]').count() == 0
+    first = groups.first
+    owner = first.get_attribute('data-host-id')
+    assert owner
+    assert '서버' in first.locator('summary').inner_text()
+    first.locator('summary').click()
+    expect(first.locator('table')).to_be_visible()
+    assert page.locator('details.server-group[open]').count() == 1
+    page.get_by_label('서버 필터', exact=True).select_option(owner)
+    expect(page.locator('details.server-group')).to_have_count(1)
+    assert page.locator('details.server-group').get_attribute('data-host-id') == owner
+    assert hash_query(page)['host'] == [owner]
+    page.reload()
+    expect(page.get_by_label('서버 필터', exact=True)).to_have_value(owner)
+    assert page.locator('details.server-group[open]').count() == 0
+    if route != '#/software?q=open':
+        assert csv_query(page)['host'] == [owner]
+    page.get_by_label('서버 필터', exact=True).select_option('')
+    expect(page.locator('details.server-group')).to_have_count(total)
+    assert 'host' not in hash_query(page)
+    assert page.problems == []
+
+
+def test_host_inventory_sections_start_closed_and_keep_their_server_context(site, make_page):
+    page = make_page()
+    host = next(row for row in call(site.base, '/v1/containers') if row['cluster_id'] is not None)
+    open_route(page, site.base, f"#/hosts/{host['host_id']}", expand_inventory=False)
+    sections = page.locator('details.inventory-section')
+    expect(sections).to_have_count(4)
+    assert page.locator('details.inventory-section[open]').count() == 0
+    for section in sections.all():
+        section.locator('summary').click()
+        expect(section.locator('.scroll').first).to_be_visible()
+    links = page.locator('details.inventory-section[data-kind="software"] a')
+    assert links.count() > 0
+    assert all(f"host={host['host_id']}" in href for href in links.evaluate_all('(els) => els.map(e => e.getAttribute("href"))'))
+
+
+def test_software_loads_only_expanded_server_and_unknown_filter_stays_scoped(site, make_page):
+    page = make_page(token=RD)
+    requests = []
+    page.on('request', lambda r: requests.append(urlparse(r.url).path))
+    open_route(page, site.base, '#/software?q=open', expand_inventory=False)
+    groups = page.locator('details.server-group')
+    expect(groups.first).to_be_visible()
+    assert not any(re.fullmatch('/v1/hosts/[^/]+', path) for path in requests)
+    first = groups.first
+    owner = first.get_attribute('data-host-id')
+    first.locator('summary').click()
+    expect(first.locator('table')).to_be_visible()
+    assert [p for p in requests if re.fullmatch('/v1/hosts/[^/]+', p)] == [f'/v1/hosts/{owner}']
+    first.locator('summary').click()
+    first.locator('summary').click()
+    expect(first.locator('table')).to_be_visible()
+    assert requests.count(f'/v1/hosts/{owner}') == 1
+    first.locator('a').filter(has_text='openssl').first.click()
+    expect(page.get_by_label('서버 필터', exact=True)).to_have_value(owner)
+    assert csv_query(page)['host'] == [owner]
+    for route in ('#/software', '#/containers/list', '#/network', '#/network/ports'):
+        open_route(page, site.base, route + '?host=missing', expand_inventory=False)
+        expect(page.get_by_label('서버 필터', exact=True)).to_have_value('missing')
+        expect(page.locator('details.server-group')).to_have_count(0)
+        expect(page.get_by_text('조건에 맞는 서버 데이터가 없습니다.')).to_be_visible()
     assert page.problems == []

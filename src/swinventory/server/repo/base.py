@@ -146,6 +146,9 @@ class InventoryRepository(ABC):
     def software_search(self, q: str, limit: int = 100) -> list[dict[str, Any]]: ...
 
     @abstractmethod
+    def software_hosts(self, q: str = "", host_id: str | None = None) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
     def software_detail(self, name: str) -> dict[str, Any] | None: ...
 
     @abstractmethod

@@ -23,12 +23,15 @@ def build_router(repo: InventoryRepository, require_read: Callable[..., None], a
 
     @router.get("/ips", response_model=None)
     def ips(q: str | None = Query(None, max_length=200), tag: list[str] = Query(default=[]),
+            host: str | None = Query(None, max_length=128),
             conflicts: bool = Query(False, description="true 면 다른 호스트도 쓰는 IP(duplicate)의 행만. false 는 필터가 아니다"),
             fmt: str = FORMAT) -> Response | list[dict]:
         """IP·MAC 인벤토리. q 는 IP·MAC·호스트명·인터페이스·자산번호 부분 일치(대소문자 무시). duplicate=같은 IP 를 다른 호스트도 쓴다."""
         tags = parse_tags(tag)
         rows = repo.list_ips(tags)
         shared = ip_conflicts(repo.list_ips() if tags else rows)   # 충돌은 태그와 무관하게 전체 기준으로 판정
+        if host is not None:
+            rows = [row for row in rows if row["host_id"] == host]
         out = [{**{k: v for k, v in r.items() if k != "address"}, "cidr": r["address"], "duplicate": r["ip"] in shared} for r in rows]
         if conflicts:
             out = [r for r in out if r["duplicate"]]
@@ -46,11 +49,12 @@ def build_router(repo: InventoryRepository, require_read: Callable[..., None], a
                 for ip, rows in sorted(ip_conflicts(repo.list_ips()).items())]
 
     @router.get("/ports")
-    def ports_summary(proto: str | None = _PROTO, exposure: str | None = _EXPOSURE, tag: list[str] = Query(default=[])) -> list[dict]:
+    def ports_summary(proto: str | None = _PROTO, exposure: str | None = _EXPOSURE, tag: list[str] = Query(default=[]),
+                      host: str | None = Query(None, max_length=128)) -> list[dict]:
         """(프로토콜, 포트)별 호스트 수. exposed_count=루프백이 아닌 주소에 바인딩한 호스트 수."""
         groups: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
         for r in map(annotate_port, repo.list_ports(parse_tags(tag))):
-            if (proto is None or r["proto"] == proto) and matches_exposure(r, exposure):
+            if (host is None or r["host_id"] == host) and (proto is None or r["proto"] == proto) and matches_exposure(r, exposure):
                 groups[(r["proto"], r["port"])].append(r)
         out = [{"proto": p, "port": n, "service": service_name(n), "host_count": len({r["host_id"] for r in rows}),
                 "exposed_count": len({r["host_id"] for r in rows if r["exposure"] != "loopback"}),
@@ -60,13 +64,14 @@ def build_router(repo: InventoryRepository, require_read: Callable[..., None], a
 
     @router.get("/listening", response_model=None)
     def listening(proto: str | None = _PROTO, port: int | None = Query(None, ge=1, le=65535), exposure: str | None = _EXPOSURE,
+                  host: str | None = Query(None, max_length=128),
                   notable: bool | None = None, tag: list[str] = Query(default=[]),
                   q: str | None = Query(None, max_length=200, description="포트·서비스·프로토콜 부분 일치 — 화면의 포트 검색(\"<포트> <서비스> <프로토콜>\")과 같은 규칙"),
                   fmt: str = FORMAT) -> Response | list[dict]:
         """호스트×리슨 포트 평면 목록(감사·내보내기용)."""
         needle = (q or "").strip().lower()
         rows = [r for r in map(annotate_port, repo.list_ports(parse_tags(tag)))
-                if (proto is None or r["proto"] == proto) and (port is None or r["port"] == port)
+                if (host is None or r["host_id"] == host) and (proto is None or r["proto"] == proto) and (port is None or r["port"] == port)
                 and matches_exposure(r, exposure) and (notable is None or r["notable"] is notable)
                 and (not needle or needle in f"{r['port']} {r['service']} {r['proto']}".lower())]
         assets.annotate(rows)

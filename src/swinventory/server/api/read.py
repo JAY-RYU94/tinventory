@@ -145,15 +145,23 @@ def build_router(repo: InventoryRepository, require_read: Callable[..., None],
     def software(q: str = Query(min_length=1), limit: int = Query(100, ge=1, le=1000)) -> list[dict]:
         return repo.software_search(q, limit)
 
+    @router.get("/software-hosts", dependencies=read)
+    def software_hosts(q: str = Query("", max_length=200), host: str | None = Query(None, max_length=128)) -> list[dict]:
+        return assets.annotate(repo.software_hosts(q.strip(), host))
+
     @router.get("/software/{name:path}", dependencies=read, response_model=None)
     def software_detail(name: str, version: str | None = Query(None, max_length=256, description="이 버전을 가진 호스트만(정확히 일치)"),
                         below: str | None = Query(None, max_length=256, description="이 버전보다 낮은 호스트만(숫자·문자 토큰 비교, 같은 버전은 제외)"),
-                        fmt: str = _FORMAT) -> Response | dict:
-        """version·below 는 hosts 만 거른다 — versions(분포)는 항상 전체다. 한 호스트에 여러 버전이 공존하면 버전(행) 단위로 거르고,
+                        host: str | None = Query(None, max_length=128), fmt: str = _FORMAT) -> Response | dict:
+        """version·below 는 hosts 만 거른다 — versions(분포)는 선택한 host 범위 전체다(미선택 시 모든 서버). 한 호스트에 여러 버전이 공존하면 버전(행) 단위로 거르고,
         일치하는 행이 없어도 패키지가 있으면 200(빈 hosts)이다. 404 는 패키지가 아예 없을 때만."""
         detail = repo.software_detail(name)
         if detail is None:
             raise HTTPException(404, "package not found")
+        if host is not None:
+            detail["hosts"] = [row for row in detail["hosts"] if row["host_id"] == host]
+            detail["versions"] = [{"version": value, "host_count": 1}
+                                  for value in sorted({row["version"] for row in detail["hosts"]}, key=version_key, reverse=True)]
         version, below = version or None, below or None   # 빈 값은 필터가 아니다
         limit = version_key(below) if below is not None else None
         detail["hosts"] = [h for h in detail["hosts"]

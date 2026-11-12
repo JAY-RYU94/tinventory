@@ -169,3 +169,14 @@ td.asset, td.os { min-width: 11em; }
   .login { margin: 8vh auto; }
 }
 @media (pointer: coarse) { button, select, input:not([type=checkbox]):not([type=radio]) { min-height: 40px; } }
+
+/* 서버 소유 항목은 접힌 요약에서도 소유자·건수를 확인한다. */
+.server-groups { padding: 0; }
+.server-group + .server-group { border-top: 1px solid var(--line); }
+.server-group > summary, .inventory-section > summary { padding: 14px; cursor: pointer; overflow-wrap: anywhere; }
+.server-group > summary:focus-visible, .inventory-section > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.server-id { display: block; font-size: .8em; margin: 4px 0 0 18px; }
+.server-group-body { padding: 0 12px 12px; min-width: 0; }
+.inventory-section { margin: 18px 0; min-width: 0; }
+.inventory-section > summary h2 { display: inline; margin: 0; }
+.inventory-section > summary { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px; }

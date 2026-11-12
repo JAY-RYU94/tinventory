@@ -252,3 +252,20 @@ def test_network_endpoints_require_read_role(client):
     for path in ("/v1/network/ips", "/v1/network/ip-conflicts", "/v1/network/ports", "/v1/network/listening"):
         assert client.get(path).status_code == 401
         assert client.get(path, headers=ING).status_code == 403
+
+
+def test_server_filter_preserves_global_conflicts_and_csv_scope(client):
+    seed(client)
+    ips = client.get('/v1/network/ips', params={'host': 'a'}, headers=RD).json()
+    assert ips and {row['host_id'] for row in ips} == {'a'}
+    assert next(row for row in ips if row['ip'] == '10.0.0.5')['duplicate'] is True
+    bindings = client.get('/v1/network/listening', params={'host': 'b'}, headers=RD).json()
+    assert bindings and {row['host_id'] for row in bindings} == {'b'}
+    summary = client.get('/v1/network/ports', params={'host': 'b'}, headers=RD).json()
+    assert summary and all(row['host_count'] == 1 for row in summary)
+    assert not any(row['port'] == 23 for row in summary)
+    for endpoint in ('ips', 'ports', 'listening'):
+        assert client.get(f'/v1/network/{endpoint}', params={'host': 'missing'}, headers=RD).json() == []
+    for endpoint in ('ips', 'listening'):
+        exported = rows(client.get(f'/v1/network/{endpoint}', params={'host': 'b', 'format': 'csv'}, headers=RD))
+        assert exported and {row['host_id'] for row in exported} == {'b'}

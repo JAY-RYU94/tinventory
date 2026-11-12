@@ -535,40 +535,83 @@
       body);
   }
 
+  // 이름이 같은 서버도 host_id 로 분리하고, 없는 서버 필터도 임의 해제하지 않는다.
+  function serverFilter(hosts, selected, change) {
+    const counts = new Map();
+    hosts.forEach((r) => counts.set(r.hostname, (counts.get(r.hostname) || 0) + 1));
+    return h("select", { "aria-label": "서버 필터", onchange: (e) => change(e.target.value) },
+      h("option", { value: "", selected: !selected }, "모든 서버"),
+      selected && !hosts.some((r) => r.host_id === selected) ? h("option", { value: selected, selected: true }, `등록되지 않은 서버 (${selected})`) : null,
+      hosts.map((r) => h("option", { value: r.host_id, selected: r.host_id === selected }, counts.get(r.hostname) > 1 ? `${r.hostname} (${r.host_id})` : r.hostname)));
+  }
+
+  function serverGroups(rows, render, label, countOf = (items) => items.length, lazy = false) {
+    if (!rows.length) return empty("조건에 맞는 서버 데이터가 없습니다.");
+    const groups = new Map();
+    rows.forEach((r) => { if (!groups.has(r.host_id)) groups.set(r.host_id, []); groups.get(r.host_id).push(r); });
+    return h("div", { class: "panel server-groups" }, [...groups].map(([id, items]) => {
+      const body = h("div", { class: "server-group-body" });
+      let loaded = !lazy;
+      if (!lazy) body.append(render(items));
+      const details = h("details", { class: "server-group", "data-host-id": id },
+        h("summary", null, `서버: ${items[0].hostname || id} · ${label} ${countOf(items)}개`, h("span", { class: "muted server-id" }, id)), body);
+      details.addEventListener("toggle", async () => {
+        if (!details.open || loaded) return;
+        loaded = true;
+        clear(body).append(h("p", { role: "status" }, "불러오는 중…"));
+        try { clear(body).append(await render(items)); }
+        catch (err) { loaded = false; clear(body).append(h("div", { class: "error", role: "alert" }, errMsg(err, "불러오지 못했습니다. 접었다 다시 펼쳐 재시도하세요."))); }
+      });
+      return details;
+    }));
+  }
+
+  function inventorySection(kind, title, ...content) {
+    return h("details", { class: "inventory-section", "data-kind": kind }, h("summary", null, h("h2", null, title)), ...content);
+  }
+
   // ---------- 소프트웨어 ----------
   async function viewSoftware(rest, q, alive) {
     if (rest[0]) return softwareDetail(rest.join("/"), q);
-    const input = h("input", { type: "search", placeholder: "패키지 이름 검색 (예: openssl)", "aria-label": "패키지 이름 검색", value: q.get("q") || "", size: 36 });
-    const out = h("div");
-    let timer; let seq = 0;
+    const st = { q: q.get("q") || "", host: q.get("host") || "" };
+    const hosts = await api("/v1/hosts");
+    const input = h("input", { type: "search", placeholder: "패키지 이름 검색 (예: openssl)", "aria-label": "패키지 이름 검색", value: st.q, size: 36 });
+    const out = h("div"); let seq = 0;
     const run = async () => {
       const mine = ++seq;
-      const term = input.value.trim();
-      if (!term) { clear(out).append(empty("검색어를 입력하세요.")); return; }
+      const params = new URLSearchParams();
+      if (st.q.trim()) params.set("q", st.q.trim());
+      if (st.host) params.set("host", st.host);
       try {
-        const found = await api(`/v1/software?q=${enc(term)}&limit=200`);
+        const rows = await api(`/v1/software-hosts?${params}`);
         if (mine !== seq || !alive()) return;
-        clear(out).append(h("div", null, table([
-          { title: "패키지", mono: true, sort: (r) => r.name, render: (r) => link(r.name, `#/software/${enc(r.name)}`) },
-          { title: "설치 호스트", desc: true, sort: (r) => r.host_count, render: (r) => r.host_count },
-          { title: "버전 종류", desc: true, sort: (r) => r.version_count, render: (r) => (r.version_count > 1 ? badge(`${r.version_count}개 버전`, "warn") : "1") },
-        ], found, "검색 결과가 없습니다."), found.length >= 200 ? h("p", { class: "hint" }, "처음 200개만 표시합니다 — 검색어를 더 구체적으로 입력하세요.") : null));
+        const term = st.q.trim().toLowerCase();
+        clear(out).append(serverGroups(rows, async ([owner]) => {
+          const d = await api(`/v1/hosts/${enc(owner.host_id)}`);
+          return table([
+            { title: "패키지", mono: true, sort: (r) => r.name, render: (r) => link(r.name, `#/software/${enc(r.name)}?host=${enc(owner.host_id)}`) },
+            { title: "버전", mono: true, sort: (r) => r.version, render: (r) => r.version || "-" },
+            { title: "아키텍처", sort: (r) => r.arch, render: (r) => r.arch || "-" },
+            { title: "출처", sort: (r) => r.source, render: (r) => r.source },
+          ], d.packages.filter((r) => r.name.toLowerCase().includes(term)));
+        }, "소프트웨어", (items) => items[0].package_count, true));
       } catch (err) { if (mine === seq && alive()) clear(out).append(h("div", { class: "error", role: "alert" }, err.message)); }
     };
-    input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => { if (!alive()) return; replaceQuery("#/software", { q: input.value.trim() }); run(); }, 300); });
+    liveInput(input, st, "#/software", run, alive);
     run();
-    return h("div", null, h("h1", null, "소프트웨어"), h("div", { class: "toolbar" }, input), out);
+    return h("div", null, h("h1", null, "소프트웨어"), h("div", { class: "toolbar" }, serverFilter(hosts, st.host, (host) => setQuery("#/software", { ...st, host })), input), out);
   }
 
   async function softwareDetail(name, q) {
-    const st = { version: q.get("version") || "", below: (q.get("below") || "").trim() };
+    const st = { version: q.get("version") || "", below: (q.get("below") || "").trim(), host: q.get("host") || "" };
     const params = () => {
       const p = new URLSearchParams();
       if (st.version) p.set("version", st.version);
       if (st.below) p.set("below", st.below);
+      if (st.host) p.set("host", st.host);
       return p;
     };
-    const d = await api(`/v1/software/${enc(name)}?${params()}`);
+    const [d, hosts] = await Promise.all([api(`/v1/software/${enc(name)}?${params()}`), api("/v1/hosts")]);
     const base = `#/software/${enc(name)}`;
     const apply = (patch) => setQuery(base, { ...st, ...patch });
     const belowIn = h("input", { type: "text", id: "below-version", placeholder: "예: 3.0.11", value: st.below, size: 14 });
@@ -576,7 +619,7 @@
     if (st.version) chips.push(chip(`버전 = ${st.version}`, () => apply({ version: "" }), `버전 ${st.version}`));
     if (st.below) chips.push(chip(`${st.below} 미만`, () => apply({ below: "" }), `${st.below} 미만`));
     return titled(h("div", null,
-      h("div", { class: "toolbar" }, link("← 검색", "#/software"), h("span", { class: "spacer" }), csvButton(() => `/v1/software/${enc(name)}?${withFormat(params())}`, `${name}-hosts.csv`)),
+      h("div", { class: "toolbar" }, link("← 검색", `#/software${st.host ? `?host=${enc(st.host)}` : ""}`), serverFilter(hosts, st.host, (host) => apply({ host })), h("span", { class: "spacer" }), csvButton(() => `/v1/software/${enc(name)}?${withFormat(params())}`, `${name}-hosts.csv`)),
       h("h1", { class: "mono" }, d.name),
       h("h2", null, "버전 분포"),
       h("p", { class: "hint" }, "막대를 누르면 그 버전을 쓰는 호스트만 아래 목록에 보입니다. 다시 누르면 해제됩니다."),
@@ -588,13 +631,13 @@
         h("label", { for: "below-version" }, "이 버전 미만"), belowIn, h("button", { type: "submit" }, "적용"),
         chips),
       h("h2", null, `설치 호스트 (${d.hosts.length})`),
-      table([
+      serverGroups(d.hosts, (items) => table([
         { title: "호스트", sort: (r) => r.hostname, render: (r) => link(r.hostname, `#/hosts/${enc(r.host_id)}`) },
         ...assetCols,
         { title: "버전", mono: true, sort: (r) => r.version, render: (r) => r.version || "-" },
         { title: "아키텍처", sort: (r) => r.arch, render: (r) => r.arch || "-" },
         { title: "출처", sort: (r) => r.source, render: (r) => r.source },
-      ], d.hosts, st.version || st.below ? "조건에 맞는 호스트가 없습니다." : "데이터가 없습니다.")), name);
+      ], items), "소프트웨어")), name);
   }
 
   // ---------- 호스트 ----------
@@ -674,7 +717,7 @@
     const drawPkgs = () => {
       const term = pkgSearch.value.trim().toLowerCase();
       clear(pkgBody).append(table([
-        { title: "패키지", mono: true, sort: (p) => p.name, render: (p) => link(p.name, `#/software/${enc(p.name)}`) },
+        { title: "패키지", mono: true, sort: (p) => p.name, render: (p) => link(p.name, `#/software/${enc(p.name)}?host=${enc(hostId)}`) },
         { title: "버전", mono: true, sort: (p) => p.version, render: (p) => p.version || "-" },
         { title: "아키텍처", sort: (p) => p.arch, render: (p) => p.arch || "-" },
         { title: "출처", sort: (p) => p.source, render: (p) => p.source },
@@ -703,26 +746,26 @@
           h("dt", null, "설치된 커널"), h("dd", { class: "mono" }, d.kernels.map((x) => h("div", null, x.version, x.is_running ? " ← 실행 중" : "")))) : h("span", { class: "muted" }, "커널 정보 없음"))),
       h("h2", null, "장비·자산"),
       h("div", { class: "grid2" }, assetPanel(d), hardwarePanel(d.hardware)),
-      d.containers.length || d.k8s ? [h("h2", null, `컨테이너 (${d.containers.length})`), containerPanel(d)] : null,
-      h("h2", null, "네트워크 인터페이스"),
+      inventorySection("containers", `컨테이너 (${d.containers.length})`, containerPanel(d)),
+      inventorySection("network", `네트워크 인터페이스 (${d.interfaces.length})`,
       d.interfaces.length ? table([
         { title: "이름", mono: true, sort: (i) => i.name, render: (i) => i.name },
         { title: "MAC", mono: true, sort: (i) => i.mac, render: (i) => i.mac || "-" },
         { title: "상태", sort: (i) => i.state, render: (i) => badge(i.state === "up" ? "up" : i.state === "down" ? "down" : "알 수 없음", i.state === "up" ? "ok" : "") },
         { title: "주소", mono: true, render: (i) => (i.addresses.length ? i.addresses.map((a) => h("div", null, a)) : h("span", { class: "muted" }, "전역 주소 없음")) },
-      ], d.interfaces) : empty("네트워크 정보가 아직 수집되지 않았습니다(에이전트 0.2 이상 필요)."),
-      h("h2", null, `열린 포트 (${d.ports.length})`),
+      ], d.interfaces) : empty("네트워크 정보가 아직 수집되지 않았습니다(에이전트 0.2 이상 필요).")),
+      inventorySection("ports", `열린 포트 (${d.ports.length})`,
       d.ports.length ? table([
-        { title: "포트", mono: true, sort: (p) => p.port, render: (p) => link(`${p.proto}/${p.port}`, `#/network/ports/${p.proto}/${p.port}`) },
+        { title: "포트", mono: true, sort: (p) => p.port, render: (p) => link(`${p.proto}/${p.port}`, `#/network/ports/${p.proto}/${p.port}?host=${enc(hostId)}`) },
         { title: "서비스", sort: (p) => p.service, render: (p) => p.service || "-" },
         { title: "바인딩", mono: true, sort: (p) => p.bind, render: (p) => p.bind },
         { title: "노출", render: (p) => { const [t, kk] = EXPOSURE[p.exposure]; return [badge(t, kk), p.notable ? " " : null, p.notable ? h("span", { class: "badge err", title: p.notable_reason }, "주의") : null]; } },
       ], d.ports) : empty("열린 포트가 없거나 아직 수집되지 않았습니다."),
-      h("p", { class: "hint" }, "노출은 바인딩 주소 기준입니다. 방화벽 규칙은 반영되지 않으므로 '외부에서 접근 가능한 후보'로 보세요."),
+      h("p", { class: "hint" }, "노출은 바인딩 주소 기준입니다. 방화벽 규칙은 반영되지 않으므로 '외부에서 접근 가능한 후보'로 보세요.")),
       h("h2", null, "태그 (소유팀·환경 등)"),
       h("div", { class: "panel" }, adminNote(), tagBox, h("div", { class: "toolbar" }, saveBtn, tagMsg.el)),
-      h("h2", null, `설치된 소프트웨어 (${d.packages.length})`),
-      h("div", { class: "toolbar" }, pkgSearch), pkgBody,
+      inventorySection("software", `설치된 소프트웨어 (${d.packages.length})`,
+        h("div", { class: "toolbar" }, pkgSearch), pkgBody),
       h("h2", null, "변경 이력"),
       h("p", null, link("이 호스트의 전체 이력 →", `#/events?host=${enc(host.host_id)}`)),
       eventsTable(d.events, false)), host.hostname);
@@ -1123,13 +1166,13 @@
   }
 
   function containersTable(rows) {
-    return table([
+    return serverGroups(rows, (items) => table([
       { title: "호스트", sort: (r) => r.hostname, render: (r) => link(r.hostname, `#/hosts/${enc(r.host_id)}`) }, ...assetCols,
       { title: "클러스터", sort: (r) => (r.cluster_id === null ? null : r.cluster_id || "미확인"), render: (r) => (r.cluster_id === null ? h("span", { class: "muted" }, "-") : link((r.cluster_id || "미확인").slice(0, 8), `#/containers/clusters/${enc(r.cluster_id || "unknown")}`)) },
       { title: "파드", mono: true, sort: (r) => (r.pod ? `${r.namespace}/${r.pod}` : null), render: (r) => (r.pod ? `${r.namespace}/${r.pod}` : "-") },
       { title: "컨테이너", mono: true, sort: (r) => r.name, render: (r) => r.name }, { title: "이미지", mono: true, sort: (r) => r.image, render: (r) => r.image },
       { title: "상태", sort: (r) => (CONTAINER_STATE[r.state] || [r.state])[0], render: (r) => stateBadge(r.state) },
-    ], rows, "조건에 맞는 컨테이너가 없습니다.");
+    ], items), "컨테이너");
   }
 
   async function containersList(q, alive) {
@@ -1141,7 +1184,7 @@
       if (st.q.trim()) p.set("q", st.q.trim());
       return p;
     };
-    const first = await api(`/v1/containers?${params()}`);
+    const [first, hosts] = await Promise.all([api(`/v1/containers?${params()}`), api("/v1/hosts")]);
     const apply = (patch) => setQuery("#/containers/list", { ...st, ...patch });
     const hostName = (first.find((r) => r.host_id === st.host) || {}).hostname || st.host.slice(0, 8);
     const chips = [];   // URL 로 걸린 필터는 화면에 보이지 않으면 결과가 비어 보이는 이유를 알 수 없다 — 칩으로 드러내고 하나씩 끈다
@@ -1165,6 +1208,7 @@
     return h("div", null, h("h1", null, "컨테이너·쿠버네티스"), containerTabs("list"),
       h("div", { class: "toolbar" },
         h("label", null, h("input", { type: "checkbox", checked: !!st.active, onchange: (e) => apply({ active: e.target.checked ? "1" : "" }) }), "종료된 컨테이너 제외"),
+        serverFilter(hosts, st.host, (host) => apply({ host })),
         sel("런타임 필터", "runtime", [["", "모든 런타임"], ["docker", "docker"], ["containerd", "containerd"], ["cri-o", "cri-o"]]),
         sel("상태 필터", "state", [["", "모든 상태"], ["running", "실행 중"], ["exited", "종료"], ["created", "생성됨"], ["paused", "일시정지"]]),
         chips,
@@ -1265,18 +1309,20 @@
   const exposureBadge = (e) => { const [t, k] = EXPOSURE[e] || [e, ""]; return badge(t, k); };
 
   async function viewNetwork(rest, q, alive) {
-    if (rest[0] === "ports") return rest[2] ? portDetail(rest[1], rest[2]) : portsView(q, alive);
+    if (rest[0] === "ports") return rest[2] ? portDetail(rest[1], rest[2], q) : portsView(q, alive);
     return ipsView(q, alive);
   }
 
   async function ipsView(q, alive) {
-    const st = { q: q.get("q") || "", conflicts: q.get("conflicts") ? "1" : "" };
+    const st = { q: q.get("q") || "", host: q.get("host") || "", conflicts: q.get("conflicts") ? "1" : "" };
     const params = () => {
       const p = new URLSearchParams();
       if (st.q.trim()) p.set("q", st.q.trim());
+      if (st.host) p.set("host", st.host);
       if (st.conflicts) p.set("conflicts", "true");
       return p;
     };
+    const hosts = await api("/v1/hosts");
     const input = h("input", { type: "search", placeholder: "IP·MAC·호스트·자산번호·인터페이스 검색", "aria-label": "IP·MAC 검색", value: st.q, size: 36 });
     // '충돌만'은 서버가 거른다(CSV 도 같은 조건) — 주소에 남겨 새로 고침·공유에도 유지된다. 다시 그리지 않으므로 포커스도 유지된다.
     const conflictsOnly = h("input", { type: "checkbox", checked: !!st.conflicts, onchange: () => { st.conflicts = conflictsOnly.checked ? "1" : ""; replaceQuery("#/network", { ...st, q: st.q.trim() }); run(); } });
@@ -1288,7 +1334,7 @@
         if (mine !== seq || !alive()) return;
         const dupIps = new Set(rows.filter((r) => r.duplicate).map((r) => r.ip));
         clear(banner); if (dupIps.size) banner.append(h("div", { class: "notice" }, `IP 충돌 ${dupIps.size}건: 같은 IP 를 둘 이상의 호스트가 사용합니다. (${[...dupIps].slice(0, 5).join(", ")}${dupIps.size > 5 ? " …" : ""})`));
-        clear(out).append(table([
+        clear(out).append(serverGroups(rows, (items) => table([
           { title: "IP", mono: true, sort: (r) => r.cidr, render: (r) => r.cidr },
           { title: "호스트", sort: (r) => r.hostname, render: (r) => link(r.hostname, `#/hosts/${enc(r.host_id)}`) },
           ...assetCols,
@@ -1296,70 +1342,71 @@
           { title: "MAC", mono: true, sort: (r) => r.mac, render: (r) => r.mac || "-" },
           { title: "상태", sort: (r) => r.state, render: (r) => badge(r.state === "up" ? "up" : r.state === "down" ? "down" : "?", r.state === "up" ? "ok" : "") },
           { title: "", srTitle: "충돌", sort: (r) => Number(!!r.duplicate), desc: true, render: (r) => (r.duplicate ? badge("IP 충돌", "err") : "") },
-        ], rows, "조건에 맞는 주소가 없습니다."));
+        ], items), "네트워크 주소"));
       } catch (err) { if (mine === seq && alive()) clear(out).append(h("div", { class: "error", role: "alert" }, err.message)); }
     };
     liveInput(input, st, "#/network", run, alive);
     run();
     return h("div", null, h("h1", null, "네트워크"), netTabs("ips"),
-      h("div", { class: "toolbar" }, input, h("label", null, conflictsOnly, "충돌만"), h("span", { class: "spacer" }), csvButton(() => `/v1/network/ips?${withFormat(params())}`, "ips.csv")), banner, out);
+      h("div", { class: "toolbar" }, serverFilter(hosts, st.host, (host) => setQuery("#/network", { ...st, host })), input, h("label", null, conflictsOnly, "충돌만"), h("span", { class: "spacer" }), csvButton(() => `/v1/network/ips?${withFormat(params())}`, "ips.csv")), banner, out);
+  }
+
+  function listeningTable(rows) {
+    return table([
+      { title: "포트", mono: true, sort: (r) => r.port, render: (r) => link(`${r.proto}/${r.port}`, `#/network/ports/${r.proto}/${r.port}?host=${enc(r.host_id)}`) },
+      { title: "호스트", sort: (r) => r.hostname, render: (r) => link(r.hostname, `#/hosts/${enc(r.host_id)}`) },
+      ...assetCols,
+      { title: "서비스", sort: (r) => r.service, render: (r) => r.service || "-" },
+      { title: "바인딩", mono: true, sort: (r) => r.bind, render: (r) => r.bind },
+      { title: "노출", sort: (r) => r.exposure, render: (r) => [exposureBadge(r.exposure), r.notable ? h("span", { class: "badge err", title: r.notable_reason }, "주의") : null] },
+    ], rows);
   }
 
   async function portsView(q, alive) {
-    const st = { proto: q.get("proto") || "", exposure: q.get("exposure") || "", notable: q.get("notable") || "", q: q.get("q") || "" };
+    const st = { proto: q.get("proto") || "", exposure: q.get("exposure") || "", notable: q.get("notable") || "", q: q.get("q") || "", host: q.get("host") || "" };
     const params = () => {
       const p = new URLSearchParams();
-      for (const k of ["proto", "exposure"]) if (st[k]) p.set(k, st[k]);
-      return p;
-    };
-    const rows = await api(`/v1/network/ports?${params()}`);
-    const apply = (patch) => setQuery("#/network/ports", { ...st, ...patch });
-    const body = h("div");
-    const draw = () => {
-      const term = st.q.trim().toLowerCase();
-      const shown = rows.filter((r) => (!st.notable || r.notable) && (!term || `${r.port} ${r.service} ${r.proto}`.toLowerCase().includes(term)));
-      clear(body).append(table([
-        { title: "포트", mono: true, sort: (r) => r.port, render: (r) => link(`${r.proto}/${r.port}`, `#/network/ports/${r.proto}/${r.port}`) },
-        { title: "서비스", sort: (r) => r.service, render: (r) => r.service || "-" },
-        { title: "호스트 수", desc: true, sort: (r) => r.host_count, render: (r) => r.host_count },
-        { title: "외부 바인딩", desc: true, sort: (r) => r.exposed_count, render: (r) => r.exposed_count },
-        { title: "", srTitle: "주의", render: (r) => (r.notable ? h("span", { class: "badge err", title: r.notable_reason }, `주의: ${r.notable_reason}`) : "") },
-      ], shown, "조건에 맞는 포트가 없습니다."));
-    };
-    const search = h("input", { type: "search", placeholder: "포트·서비스 검색 (예: 22, ssh)", "aria-label": "포트·서비스 검색", size: 26, value: st.q });
-    search.addEventListener("input", () => { st.q = search.value; replaceQuery("#/network/ports", { ...st, q: st.q.trim() }); draw(); });
-    draw();
-    const sel = (label, name, options) => h("select", { "aria-label": label, onchange: (e) => apply({ [name]: e.target.value }) },
-      options.map(([v, t]) => h("option", { value: v, selected: v === st[name] }, t)));
-    // CSV 는 같은 조건(프로토콜·노출·주의 포트·검색어)의 호스트×포트 평면 목록이다.
-    const csvParams = () => {
-      const p = params();
+      for (const k of ["proto", "exposure", "host"]) if (st[k]) p.set(k, st[k]);
       if (st.notable) p.set("notable", "true");
       if (st.q.trim()) p.set("q", st.q.trim());
       return p;
     };
+    const hosts = await api("/v1/hosts");
+    const apply = (patch) => setQuery("#/network/ports", { ...st, ...patch });
+    const body = h("div"); let seq = 0;
+    const run = async () => {
+      const mine = ++seq;
+      try {
+        const rows = await api(`/v1/network/listening?${params()}`);
+        if (mine === seq && alive()) clear(body).append(serverGroups(rows, listeningTable, "열린 포트"));
+      } catch (err) { if (mine === seq && alive()) clear(body).append(h("div", { class: "error", role: "alert" }, err.message)); }
+    };
+    const search = h("input", { type: "search", placeholder: "포트·서비스 검색 (예: 22, ssh)", "aria-label": "포트·서비스 검색", size: 26, value: st.q });
+    liveInput(search, st, "#/network/ports", run, alive);
+    run();
+    const sel = (label, name, options) => h("select", { "aria-label": label, onchange: (e) => apply({ [name]: e.target.value }) },
+      options.map(([v, t]) => h("option", { value: v, selected: v === st[name] }, t)));
     return h("div", null, h("h1", null, "네트워크"), netTabs("ports"),
-      h("div", { class: "toolbar" },
+      h("div", { class: "toolbar" }, serverFilter(hosts, st.host, (host) => apply({ host })),
         sel("프로토콜 필터", "proto", [["", "tcp·udp"], ["tcp", "tcp"], ["udp", "udp"]]),
         sel("노출 필터", "exposure", [["", "모든 바인딩"], ["exposed", "외부 바인딩(루프백 제외)"], ["any", "모든 인터페이스(0.0.0.0/::)"], ["specific", "특정 주소"], ["loopback", "로컬 전용"]]),
         h("label", null, h("input", { type: "checkbox", checked: !!st.notable, onchange: (e) => apply({ notable: e.target.checked ? "1" : "" }) }), "주의 포트만"),
-        search, h("span", { class: "spacer" }), csvButton(() => `/v1/network/listening?${withFormat(csvParams())}`, "listening-ports.csv")),
-      body,
-      h("p", { class: "hint" }, "'외부 바인딩'은 루프백이 아닌 주소에 바인딩한 호스트 수입니다. 방화벽 규칙은 반영되지 않으므로 외부에서 접근 가능한 '후보'입니다. 프로세스 이름은 root 권한이 필요해 수집하지 않습니다."));
+        search, h("span", { class: "spacer" }), csvButton(() => `/v1/network/listening?${withFormat(params())}`, "listening-ports.csv")), body,
+      h("p", { class: "hint" }, "노출은 바인딩 주소 기준입니다. 방화벽 규칙은 반영되지 않습니다."));
   }
 
-  async function portDetail(proto, port) {
-    const rows = await api(`/v1/network/listening?proto=${enc(proto)}&port=${enc(port)}`);
+  async function portDetail(proto, port, q) {
+    const host = q.get("host") || "";
+    const params = new URLSearchParams({ proto, port });
+    if (host) params.set("host", host);
+    const [rows, hosts] = await Promise.all([api(`/v1/network/listening?${params}`), api("/v1/hosts")]);
+    const base = `#/network/ports/${enc(proto)}/${enc(port)}`;
     return titled(h("div", null,
-      h("div", { class: "toolbar" }, link("← 포트 목록", "#/network/ports"), h("span", { class: "spacer" }),
-        csvButton(() => `/v1/network/listening?proto=${enc(proto)}&port=${enc(port)}&format=csv`, `ports-${proto}-${port}.csv`)),
+      h("div", { class: "toolbar" }, link("← 포트 목록", `#/network/ports${host ? `?host=${enc(host)}` : ""}`),
+        serverFilter(hosts, host, (value) => setQuery(base, { host: value })), h("span", { class: "spacer" }),
+        csvButton(() => `/v1/network/listening?${withFormat(params)}`, `ports-${proto}-${port}.csv`)),
       h("h1", { class: "mono" }, `${proto}/${port}`, rows[0] && rows[0].service ? ` · ${rows[0].service}` : ""),
-      table([
-        { title: "호스트", sort: (r) => r.hostname, render: (r) => link(r.hostname, `#/hosts/${enc(r.host_id)}`) },
-        ...assetCols,
-        { title: "바인딩", mono: true, sort: (r) => r.bind, render: (r) => r.bind },
-        { title: "노출", sort: (r) => (EXPOSURE[r.exposure] || [r.exposure])[0], render: (r) => [exposureBadge(r.exposure), r.notable ? " " : null, r.notable ? h("span", { class: "badge err", title: r.notable_reason }, "주의") : null] },
-      ], rows, "이 포트를 연 호스트가 없습니다.")), `${proto}/${port}`);
+      serverGroups(rows, listeningTable, "열린 포트")), `${proto}/${port}`);
   }
 
 

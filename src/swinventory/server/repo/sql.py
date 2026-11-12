@@ -476,6 +476,19 @@ class SqlInventoryRepository(InventoryRepository):
         with self._conn() as c:
             return [dict(r) for r in c.execute(stmt).mappings()]
 
+    def software_hosts(self, q: str = "", host_id: str | None = None) -> list[dict[str, Any]]:
+        """서버별 설치 항목 수만 조회한다. 전체 패키지 본문은 펼친 서버에서만 가져온다."""
+        p, h = S.installed_packages, S.hosts
+        stmt = (select(p.c.host_id, h.c.hostname, func.count().label("package_count"))
+                .select_from(p.join(h, h.c.host_id == p.c.host_id))
+                .group_by(p.c.host_id, h.c.hostname).order_by(h.c.hostname, p.c.host_id))
+        if q:
+            stmt = stmt.where(func.lower(p.c.name).like(f"%{_escape_like(q.lower())}%", escape="\\"))
+        if host_id is not None:
+            stmt = stmt.where(p.c.host_id == host_id)
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(stmt).mappings()]
+
     def software_detail(self, name: str) -> dict[str, Any] | None:
         p, h = S.installed_packages, S.hosts
         with self._conn() as c:

@@ -165,6 +165,9 @@ CSV 는 엑셀 수식 주입(`=`, `+`, `-`, `@` 로 시작하는 셀)을 막는�
 ## 컨테이너·쿠버네티스
 
 웹 **컨테이너** 탭: **클러스터**(노드·파드·네임스페이스·이미지, 버전 혼재 표시, 이름 지정) · **이미지**(저장소별 태그 분포 — 같은 이미지의 태그가 갈라지면 "버전 혼재") · **컨테이너**(전체 목록·필터·CSV).
+
+컨테이너 목록·네트워크(IP·MAC)·열린 포트·소프트웨어는 **서버별 소유 목록**으로 표시하고 기본으로 접습니다. 요약의 서버 이름·ID·항목 수를 확인한 뒤 펼쳐 상세를 봅니다. 서버 필터는 이름이 아닌 `host_id`로 구분하며 검색·다른 필터와 함께 URL에 남고 CSV에도 적용됩니다. 호스트 상세의 네 범주도 기본으로 접습니다. 소프트웨어는 서버별 건수만 먼저 조회하고 펼친 서버의 패키지를 가져옵니다. 패키지·포트 상세 링크도 해당 서버 범위를 유지합니다. IP 충돌은 서버 필터와 관계없이 전체 서버 기준으로 판정합니다.
+
 노드는 기존 호스트라서 호스트 상세의 "컨테이너" 섹션과 모든 목록의 자산번호·구분 열이 그대로 이어진다. 서버 위 도커 컨테이너도 같은 목록에 보인다.
 
 - **쿠버네티스 API 를 쓰지 않는다**(접근 권한이 없어도 된다). 대신 **노드에 설치한 에이전트**가 노드의 컨테이너 런타임(containerd·CRI-O·docker)에서 읽는다 → **에이전트가 설치된 노드의 파드만 보이고, Deployment 같은 워크로드 단위는 알 수 없다**(파드 이름·네임스페이스는 컨테이너 라벨에서 얻는다).
@@ -268,10 +271,11 @@ CSV 는 엑셀 수식 주입(`=`, `+`, `-`, `@` 로 시작하는 셀)을 막는�
 | GET | `/v1/hosts?tag=k:v&ip=&q=&status=&format=csv` , `/v1/hosts/{id}` | 호스트 목록(`status`: ok/error/stale, `ips`, `q`=호스트명·ID·OS·자산번호·도메인·IP 부분 일치) / 상세(`interfaces`, `ports`) |
 | PUT, DELETE | `/v1/hosts/{id}/tags` , `/v1/hosts/{id}` | 태그 전체 교체 / 폐기 호스트와 이력 삭제 (admin) |
 | GET | `/v1/kernels` , `/v1/kernels/hosts?reboot_required=&running=&compliant=&tag=&q=&format=csv` | 커널 분포 / 호스트별 커널(`min_kernel`·`compliant` 포함) |
-| GET | `/v1/software?q=` , `/v1/software/{name}?version=&below=&format=csv` | 패키지 검색 / 버전 분포 + 설치 호스트(`version`=정확히 일치, `below`=그 버전 미만 — 분포는 그대로, 호스트 목록·CSV 만 좁힌다) |
+| GET | `/v1/software-hosts?q=&host=` | 서버별 설치 항목 수(패키지 본문 제외), 서버·패키지 이름 필터 |
+| GET | `/v1/software?q=` , `/v1/software/{name}?host=&version=&below=&format=csv` | 패키지 검색 / 버전 분포 + 설치 호스트(`version`=정확히 일치, `below`=그 버전 미만 — 분포는 선택한 서버 범위 전체, version·below는 호스트 목록·CSV 만 좁힌다) |
 | GET | `/v1/events?host=&type=&since=&limit=&format=csv` | 변경 이력 |
-| GET | `/v1/network/ips?q=&tag=&conflicts=&format=csv` , `/v1/network/ip-conflicts` | IP·MAC 인벤토리(`duplicate`=IP 충돌) / 충돌 목록 |
-| GET | `/v1/network/ports?proto=&exposure=` , `/v1/network/listening?proto=&port=&exposure=&notable=&tag=&q=&format=csv` | 포트 요약(호스트 수·외부 바인딩 수) / 호스트×포트 평면 목록(감사·내보내기). `exposure`: any·specific·loopback·exposed(루프백 제외) |
+| GET | `/v1/network/ips?host=&q=&tag=&conflicts=&format=csv` , `/v1/network/ip-conflicts` | IP·MAC 인벤토리(`duplicate`=IP 충돌) / 충돌 목록 |
+| GET | `/v1/network/ports?host=&proto=&exposure=` , `/v1/network/listening?host=&proto=&port=&exposure=&notable=&tag=&q=&format=csv` | 포트 요약(호스트 수·외부 바인딩 수) / 호스트×포트 평면 목록(감사·내보내기). `exposure`: any·specific·loopback·exposed(루프백 제외) |
 | GET, PUT | `/v1/settings/kernel-policy` | 커널 하한선 조회(read) / 저장(admin) |
 | GET, PUT, POST | `/v1/settings/ai` , `/v1/settings/ai/test` | AI 연결 설정 조회·저장·연결 테스트 (admin) |
 | GET | `/v1/reports/facts` | AI 에 전달되는 집계(read) |
