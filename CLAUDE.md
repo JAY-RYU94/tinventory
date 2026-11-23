@@ -82,9 +82,13 @@ PYTHONPATH=src python3 -m swinventory.server.contract --write   # 계약 스키�
 - **입력 경계(PostgreSQL 때문에 존재)**: PG 텍스트 컬럼은 NUL(`\x00`)을 저장하지 못해 SQLite 에서 안 보이던 500 이 난다.
   수집 문자열은 **제거하고 받는다**(거부하면 패키지명 하나가 호스트 전체의 수집을 막는다 — 제거는 길이 검증보다 먼저), 관리자 입력(태그·AI 설정)은 422, URL 의 `%00` 은 400(`RejectNulMiddleware`).
 - **NVD 페이지 커서**: `vulnerability_feed_status.data_version` 은 NVD 의 불투명한 페이지 커서와 완료 정보를 보존해야 한다. 짧은 문자열 길이 제한이나 절단을 추가하지 않고, 기존 PostgreSQL `VARCHAR(64)` 는 서버 시작 때 값 보존하며 `TEXT` 로 확장한다. 스키마 변경은 SQLite 와 PostgreSQL 회귀 테스트로 검증한다.
+- **업무용 SW 승인 projection**: 제품 키는 `(source, name, arch)`, 설치·승인·CVE 판정은 여기에 정확한 `version` 과 호스트를 더해 연결한다. source 문자열만으로 업무 앱/개발 의존성을 추정하지 않는다. 활성 승인은 `state=active`, 시작·만료 시각 범위 안, 철회 시각 없음만 포함한다. `needs_changes` 요청 상태는 승인 상태를 대체하지 않는다. `needs_review` 분류는 `not_required` 로 숨기지 않고 분류 필요로 표시한다.
+- **승인·요청 개인정보**: 읽기 역할의 호스트 요약에는 요청 상태·번호가 없어야 한다. 요청 역할은 본인 소유 상태·요청 번호만, 관리자는 전체를 본다. 목록의 호스트 수·보안 영향은 페이지 단위 SQL projection 으로 계산해 행마다 추가 조회하지 않는다. 큐는 페이지를 자르기 전에 `submitted`·`reviewing` 그룹을 먼저 정렬하고, 기한 NULL 은 뒤에 둔다. 요청 상세의 타인 ID 는 404 로 숨긴다.
+- **영향 판정**: `confirmed` 는 exact 설치 버전이 확정 영향 목록에 있을 때만, `no_observed_match` 는 제품 매핑은 있지만 exact 설치 버전이 확정 영향 목록과 맞지 않을 때만 쓴다. `not_assessed` 는 CVE 매핑이 없어 평가 근거가 없다는 뜻이지 안전 판정이 아니다. 정확 제품 CVE 필터는 `product_source`/`product_name`/`product_arch`/`product_version` 이며 text `q` 와 별개다. CVE 상세의 `installations` 기존 의미를 유지하고 다른 버전 행은 `observed_installations` 에 판정과 함께 추가한다. 자산 담당자 연결에는 `AssetService`/`AssetBook` 을 사용한다.
 - **동시 적재**: 같은 스냅샷/호스트가 동시에 오면 유니크 위반 → `ConflictError` → 롤백 후 1회 재시도로 `duplicate` 에 수렴. PostgreSQL 경합 테스트가 이를 강제한다(SQLite 인메모리는 경합이 없어 못 잡는다).
 - **삭제 순서(FK)**: 호스트 삭제·prune 은 events(→snapshots) → 자식 → snapshots → hosts. prune 은 남는 이벤트의 `snapshot_id` 를 먼저 NULL 로 만든다.
 - **화면**(`server/web/`): 빌드 없는 정적 파일. **`innerHTML` 금지**(`tests/server/test_ops.py` 가 코드에서 강제, 주석은 제외), CSP 는 `default-src 'self'`(인라인 스크립트·스타일 금지 — 스타일은 CSSOM 으로 대입).
+  `app.js`가 경로·세션 상태와 API 호출을 맡고, `ui-table.js`가 native HTML 표와 정렬을, `ui-workflow.js`가 승인·소프트웨어·CVE 표 표현을 맡는다. `style.css`는 `tokens.css`·`base.css`·`layout.css`·`components.css`를 불러온다. AdminLTE 4.10.2 CSS는 자체 호스팅하고 런타임 외부 네트워크 호출을 하지 않는다. AdminLTE 및 포함 Bootstrap의 MIT 라이선스와 출처·무결성 정보는 `server/web/vendor/`의 `LICENSE`와 `SOURCES.md`를 따른다.
   토큰은 sessionStorage 에만 둔다. CSV 는 수식 주입(`=+-@`)을 막는다. 새 화면을 추가하면 브라우저로 실제 시나리오(악성 입력 포함)를 돌려 확인한다.
 - **본문 상한**(`BodySizeLimitMiddleware`)은 앱 **바깥**에서 판정한다(안쪽에서 예외로 끊으면 500 이 된다). `/healthz` 는 무인증이며 내부 오류를 노출하지 않는다.
 

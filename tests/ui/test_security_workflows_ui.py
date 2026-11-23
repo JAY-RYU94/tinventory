@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import threading
 import time
+from datetime import timedelta
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 import pytest
 
@@ -41,7 +44,7 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="function")
 def app_site(tmp_path_factory):
     root = tmp_path_factory.mktemp("security-ui")
     now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
@@ -114,11 +117,225 @@ def app_site(tmp_path_factory):
         time.sleep(0.05)
     try:
         yield {"base": f"http://127.0.0.1:{port}", "request_token": request_session,
-               "admin_token": admin_session, "admin_user_id": created_admin.json()["id"], "repo": repo,
+               "admin_token": admin_session, "admin_user_id": created_admin.json()["id"],
+               "request_user_id": created_requester.json()["id"], "now": now, "repo": repo,
                "asset_id": vm_asset.json()["id"], "parent_asset_id": parent_asset.json()["id"]}
     finally:
         server.should_exit = True
         thread.join(10)
+
+
+def _api_json(base: str, token: str, path: str, *, method: str = "GET", body: dict | None = None) -> dict:
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    request = Request(f"{base}{path}", data=data, method=method,
+                      headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    with urlopen(request, timeout=10) as response:
+        return json.loads(response.read())
+
+
+def _seed_v4_workflows(app_site):
+    """두 개의 독립 요청과 네 분류 설치 항목을 실제 SQLite/API에 준비한다."""
+    repo, now = app_site["repo"], app_site["now"]
+    owners_host = "cd" * 16
+    second_request_host = "ef" * 16
+    packages = [
+        PackageRecord("dpkg", PRODUCT, "1.2.3", "amd64"),
+        PackageRecord("dpkg", "nginx", "1.24.0", "amd64"),
+        PackageRecord("dpkg", "python3-demo", "2.4.1", "amd64"),
+        PackageRecord("dpkg", "unclassified-v4", "0.1.0", "amd64"),
+    ]
+    for host_id, hostname, installed in (
+        (owners_host, "ui-v4.corp.example", packages),
+        (second_request_host, "ui-v4-secondary.corp.example", [packages[0]]),
+    ):
+        snapshot = Snapshot(host_id=host_id, hostname=hostname, collected_at=now.isoformat(),
+            agent_version="test", os=OsInfo("debian", "Debian 12", "12"),
+            kernel=KernelInfo("6.1.0", ("6.1.0",), False), packages=installed,
+            interfaces=[], ports=[], hardware=None, containers=[], k8s=None,
+            collected=["os", "kernel", "software.dpkg"], errors={})
+        IngestService(repo, clock=lambda: now).ingest(snapshot)
+
+    admin_headers = app_site["admin_token"]
+    requester_headers = app_site["request_token"]
+    for name, label, category in (
+        ("nginx", "Nginx", "os_package"),
+        ("python3-demo", "Python Demo", "development_dependency"),
+    ):
+        _api_json(app_site["base"], admin_headers, "/v1/software-products/classification", method="PUT", body={
+            "source": "dpkg", "name": name, "arch": "amd64", "category": category,
+            "product_name": label, "publisher": "Test fixture", "evidence": "격리된 UI 테스트용 분류 근거입니다.",
+        })
+    asset = _api_json(app_site["base"], admin_headers, "/v1/assets", method="POST", body={
+        "asset_no": "UI-V4-ASSET", "kind": "virtual", "hostname": "ui-v4.corp.example",
+        "host_id": owners_host, "primary_owner": "정 담당자", "secondary_owner": "부 담당자",
+    })
+    requester = app_site["request_user_id"]
+    _api_json(app_site["base"], admin_headers, f"/v1/software-request-scopes/{requester}", method="PUT",
+              body={"host_ids": [owners_host, second_request_host]})
+    requests = []
+    for host_id in (owners_host, second_request_host):
+        item = _api_json(app_site["base"], requester_headers, "/v1/software-requests", method="POST", body={
+            "source": "dpkg", "name": PRODUCT, "arch": "amd64", "version": "1.2.3",
+            "purpose": "격리 UI 테스트에서 필터를 검증합니다.",
+            "license_evidence": "가상 테스트 계약 범위이며 운영 데이터가 아닙니다.", "host_ids": [host_id],
+        })
+        requests.append(item)
+    assigned = _api_json(app_site["base"], admin_headers,
+        f"/v1/software-requests/{requests[0]['id']}/actions", method="POST", body={
+            "action": "assign", "expected_revision": requests[0]["revision"],
+            "assignee_id": app_site["admin_user_id"],
+            "due_at": (now + timedelta(days=5)).isoformat(),
+        })
+    return {"asset_id": asset["id"], "host_id": owners_host, "request_ids": [r["id"] for r in requests],
+            "assigned_request": assigned["id"]}
+
+
+def test_v4_workflow_filters_and_cve_scope_in_chrome(app_site):
+    """V4 승인·자산SW·CVE 탐색이 실제 API와 좁은 화면에서 상태를 보존한다."""
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    seeded = _seed_v4_workflows(app_site)
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(executable_path=CHROME, headless=True)
+        context = browser.new_context(viewport={"width": 1440, "height": 900}, color_scheme="light", timezone_id="Asia/Seoul")
+        context.add_init_script(f"sessionStorage.setItem('swinv.token', {json.dumps(app_site['admin_token'])})")
+        page = context.new_page()
+        errors = []
+        page.on("pageerror", lambda err: errors.append(str(err)))
+
+        def capture(name: str):
+            # Resize 후 paint가 끝난 안정된 frame에서 캡처한다. 셸 요소가 실제로 하나씩만 있는지도 함께 확인한다.
+            page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+            assert page.locator("#top").count() == 1
+            assert page.locator("#workspace-bar").count() == 1
+            page.screenshot(path=str(ARTIFACT_DIR / name), full_page=True, animations="disabled")
+            assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1"), f"viewport overflow at {name}"
+
+        def capture_widths(stem: str):
+            for width, height, suffix in ((1440, 900, ""), (1366, 768, "-1366"), (390, 844, "-390")):
+                page.set_viewport_size({"width": width, "height": height})
+                capture(f"product-v4-{stem}{suffix}.png")
+            page.set_viewport_size({"width": 1440, "height": 900})
+
+        # 승인 목록: 기본 검토 대기, 상태/보안/담당 범위, 서버 정렬, 상세 복귀를 점검한다.
+        page.goto(f"{app_site['base']}/#/sw-requests")
+        expect(page.get_by_role("heading", name="SW 사용 승인 요청")).to_be_visible()
+        expect(page.locator(".approval-grid .data-grid thead th")).to_have_count(9)
+        result = page.locator(".table-toolbar-result")
+        expect(result).to_have_text("전체 2건")
+        status = page.get_by_label("요청 상태 필터")
+        security = page.get_by_label("보안 영향 판정 필터")
+        expect(status.locator("option").first).to_have_text("모든 상태")
+        expect(security.locator("option").first).to_have_text("모든 보안 판정")
+        expect(page.locator(".approval-grid tbody tr")).to_have_count(2)
+        original_hash = page.evaluate("location.hash")
+        page.locator(".skip-link").focus()
+        page.keyboard.press("Enter")
+        expect(page.locator("#app")).to_be_focused()
+        assert page.evaluate("location.hash") == original_hash
+        page.evaluate("document.activeElement.blur()")
+        capture_widths("approvals")
+
+        status.select_option("reviewing")
+        expect(result).to_have_text("전체 1건")
+        expect(page.locator(".approval-grid tbody tr")).to_have_count(1)
+        expect(page).to_have_url(re.compile(r"scope=all.*status=reviewing|status=reviewing.*scope=all"))
+        security.select_option("not_affected")
+        expect(result).to_have_text("전체 0건")
+        security.select_option("confirmed")
+        expect(result).to_have_text("전체 1건")
+        page.get_by_role("button", name="초기화").click()
+        expect(result).to_have_text("전체 2건")
+        expect(status).to_have_value("")
+        expect(security).to_have_value("")
+        expect(page).to_have_url(re.compile(r"scope=all"))
+
+        page.get_by_role("link", name="내 검토").click()
+        expect(result).to_have_text("전체 1건")
+        sort_button = page.get_by_role("button", name=re.compile(r"요청 상태 정렬"))
+        sort_button.click()
+        expect(page.locator(".approval-grid th").nth(2)).to_have_attribute("aria-sort", "ascending")
+        expect(page).to_have_url(re.compile(r"sort=status.*direction=asc|direction=asc.*sort=status"))
+        page.get_by_role("link", name="전체", exact=True).click()
+        expect(page).to_have_url(re.compile(r"scope=all"))
+        status = page.get_by_label("요청 상태 필터")
+        expect(page.locator(".approval-grid tbody tr")).to_have_count(2)
+        status.select_option("submitted")
+        expect(page).to_have_url(re.compile(r"status=submitted"))
+        expect(result).to_have_text("전체 1건")
+        expect(page.locator(".approval-grid tbody tr")).to_have_count(1)
+        list_hash = page.evaluate("location.hash")
+        page.locator(".approval-grid tbody tr a.workflow-primary-link").first.click()
+        expect(page.get_by_role("heading", name=re.compile(r"SW-\d+"))).to_be_visible()
+        page.get_by_role("link", name="← 요청함").click()
+        expect(page).to_have_url(re.compile(re.escape(list_hash) + r"$"))
+        expect(result).to_have_text("전체 1건")
+
+        # 자산 설치 소프트웨어: 분류/승인/영향 상태와 URL을 함께 유지한다.
+        software_hash = f"#/assets/{seeded['asset_id']}?tab=software"
+        page.goto(f"{app_site['base']}/{software_hash}")
+        expect(page.locator(".asset-context-strip")).to_contain_text("정 담당자")
+        expect(page.locator(".asset-context-strip")).to_contain_text("부 담당자")
+        expect(page.locator(".software-grid .data-grid thead th")).to_have_count(7)
+        software_count = page.locator(".table-toolbar-result")
+        expect(software_count).to_have_text("4개 표시 · 전체 4개")
+        capture_widths("software")
+
+        category_tabs = page.locator(".view-tabs[aria-label='설치 소프트웨어 분류']")
+        category_tabs.locator("[data-category='os_package']").click()
+        expect(software_count).to_have_text("1개 표시 · 전체 4개")
+        expect(page.locator(".software-table tbody tr")).to_have_count(1)
+        expect(page).to_have_url(re.compile(r"software_category=os_package"))
+        category_tabs.locator("[data-category='development_dependency']").click()
+        expect(software_count).to_have_text("1개 표시 · 전체 4개")
+        category_tabs.locator("[data-category='needs_review']").click()
+        expect(software_count).to_have_text("1개 표시 · 전체 4개")
+        category_tabs.locator("[data-category='business_app']").click()
+        expect(software_count).to_have_text("1개 표시 · 전체 4개")
+        page.get_by_label("사용 승인 필터").select_option("active")
+        expect(software_count).to_have_text("0개 표시 · 전체 4개")
+        page.get_by_label("사용 승인 필터").select_option("not_active")
+        expect(software_count).to_have_text("1개 표시 · 전체 4개")
+        page.get_by_label("취약점 영향 필터").select_option("not_affected")
+        expect(software_count).to_have_text("0개 표시 · 전체 4개")
+        page.get_by_label("취약점 영향 필터").select_option("confirmed")
+        expect(software_count).to_have_text("1개 표시 · 전체 4개")
+        expect(page).to_have_url(re.compile(r"software_category=business_app.*software_approval=not_active.*software_impact=confirmed"))
+        page.get_by_role("button", name="초기화").click()
+        expect(software_count).to_have_text("4개 표시 · 전체 4개")
+        expect(page).to_have_url(re.compile(r"tab=software"))
+
+        # 정확한 제품/버전 필터 → CVE 호스트 집계 → 설치행 근거 → 범위 보존 복귀.
+        page.get_by_label("취약점 영향 필터").select_option("confirmed")
+        impact_link = page.get_by_role("link", name="영향 확인, 연결된 CVE 1건")
+        expect(impact_link).to_be_visible()
+        impact_link.click()
+        expect(page.get_by_role("heading", name="취약점 영향 조회")).to_be_visible()
+        cve_list_hash = page.evaluate("location.hash")
+        assert "host=" + seeded["host_id"] in cve_list_hash
+        assert "product_source=dpkg" in cve_list_hash and "product_name=corp-tool" in cve_list_hash
+        assert "product_arch=amd64" in cve_list_hash and "product_version=1.2.3" in cve_list_hash
+        expect(page.locator(".table-toolbar-result")).to_have_text("전체 1건")
+        expect(page.get_by_role("link", name=CVE_ID)).to_be_visible()
+        capture_widths("cve-list")
+        page.get_by_role("link", name="1대", exact=True).click()
+        expect(page.get_by_role("heading", name=CVE_ID)).to_be_visible()
+        install_section = page.locator("section.panel").filter(has_text="설치 호스트 영향 판정 (1)")
+        expect(install_section.locator("tbody tr")).to_have_count(1)
+        install_row = install_section.locator("tbody tr").first
+        expect(install_row).to_contain_text(f"{PRODUCT} · 1.2.3")
+        evidence = "격리 테스트의 정확한 설치 버전과 CVE 메타데이터 확인"
+        evidence_details = install_row.locator("details")
+        if evidence_details.count():
+            evidence_details.first.locator("summary").click()
+            expect(evidence_details.first).to_contain_text(evidence)
+        else:
+            expect(install_row).to_contain_text(evidence)
+        capture_widths("cve")
+        page.get_by_role("link", name="← 취약점 목록").click()
+        expect(page).to_have_url(re.compile(re.escape(cve_list_hash) + r"$"))
+        expect(page.locator(".table-toolbar-result")).to_have_text("전체 1건")
+        assert not errors, "브라우저 오류: " + "; ".join(errors)
+        context.close(); browser.close()
 
 
 def test_business_request_and_cve_screens_in_chrome(app_site, tmp_path):
@@ -216,9 +433,12 @@ def test_business_request_and_cve_screens_in_chrome(app_site, tmp_path):
         expect(parent_select).to_be_disabled()
         expect(parent_select).to_have_value(str(app_site["parent_asset_id"]))
         page.goto(f"{app_site['base']}/#/assets/{app_site['asset_id']}?tab=software")
-        expect(page.get_by_role("heading", name="설치 항목 1행")).to_be_visible()
-        expect(page.get_by_text("software.dpkg", exact=True)).to_be_visible()
-        expect(page.get_by_text("마지막 성공", exact=True)).to_be_visible()
+        expect(page.locator(".software-table tbody tr")).to_have_count(1)
+        freshness = page.locator(".asset-collection-details")
+        expect(freshness).to_be_visible()
+        freshness.locator("summary").click()
+        expect(freshness).to_contain_text("software.dpkg")
+        expect(freshness).to_contain_text("마지막 성공")
         page.screenshot(path=str(ARTIFACT_DIR / "asset-software-freshness-live-desktop.png"), full_page=True)
 
         # 다른 필드의 서버 변경은 보존하고, 같은 필드의 충돌만 사용자가 선택한다.

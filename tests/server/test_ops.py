@@ -275,11 +275,17 @@ def test_security_headers(client):
 
 
 def test_ui_source_never_uses_innerhtml(client):
-    """에이전트가 보낸 호스트명·패키지명은 신뢰할 수 없다 — 화면은 textContent 로만 렌더링한다."""
+    """신뢰할 수 없는 호스트·패키지 텍스트는 어느 화면 모듈에서도 HTML sink 로 렌더링하지 않는다."""
     import re
 
-    js = client.get("/app.js").text
-    js = re.sub(r"/\*.*?\*/", "", js, flags=re.S)       # 주석은 검사 대상이 아니다(설명에 단어가 나올 수 있음)
-    js = re.sub(r"(?m)(?<![:\"'])//.*$", "", js)
-    for banned in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
-        assert banned not in js, banned
+    html = client.get("/").text
+    scripts = re.findall(r"<script\b[^>]*\bsrc=[\"']([^\"']+)[\"']", html, flags=re.I)
+    assert scripts
+    for src in scripts:
+        assert src.startswith("/") and not src.startswith("//"), src
+        response = client.get(src)
+        assert response.status_code == 200, src
+        js = re.sub(r"/\*.*?\*/", "", response.text, flags=re.S)
+        js = re.sub(r"(?m)(?<![:\"'])//.*$", "", js)
+        for banned in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
+            assert banned not in js, (src, banned)

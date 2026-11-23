@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from collections import defaultdict
 from contextlib import contextmanager
@@ -9,7 +10,7 @@ from contextvars import ContextVar
 from typing import Any, Iterable, Iterator
 
 from sqlalchemy import (
-    Connection, Engine, String, Text, and_, case, cast, create_engine, delete, distinct, event, exists, func, insert, inspect, or_, select, text, update,
+    Connection, Engine, Float, Numeric, String, Text, and_, case, cast, create_engine, delete, distinct, event, exists, func, insert, inspect, or_, select, text, update,
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import StaticPool
@@ -737,6 +738,66 @@ class SqlInventoryRepository(InventoryRepository):
             rows = c.execute(stmt.order_by(p.c.name, p.c.source, p.c.arch).offset(offset).limit(limit)).mappings().all()
             return total, [dict(r) for r in rows]
 
+    def host_software_summary(self, host_id: str, at: str, *, requester_id: str | None = None,
+                              include_request_state: bool = False) -> list[dict[str, Any]]:
+        """호스트의 현재 설치를 정확한 제품·버전 단위 승인/영향 상태로 투영한다."""
+        p, m, v = S.installed_packages, S.vulnerability_product_matches, S.vulnerability_match_versions
+        category = func.coalesce(S.software_classifications.c.category, "needs_review")
+        confirmed_join = m.join(v, and_(v.c.cve_id == m.c.cve_id, v.c.source == m.c.source,
+                                        v.c.name == m.c.name, v.c.arch == m.c.arch))
+        confirmed = exists(select(v.c.cve_id).select_from(confirmed_join).where(and_(
+            m.c.source == p.c.source, m.c.name == p.c.name, m.c.arch == p.c.arch,
+            v.c.version == p.c.version, m.c.status == "affected_confirmed")))
+        review = exists(select(m.c.cve_id).where(and_(m.c.source == p.c.source, m.c.name == p.c.name,
+            m.c.arch == p.c.arch, m.c.status == "needs_review")))
+        mapped = exists(select(m.c.cve_id).where(and_(m.c.source == p.c.source, m.c.name == p.c.name,
+            m.c.arch == p.c.arch)))
+        non_negative = exists(select(m.c.cve_id).where(and_(m.c.source == p.c.source, m.c.name == p.c.name,
+            m.c.arch == p.c.arch, m.c.status != "not_affected")))
+        impact = case((confirmed, "confirmed"), (review, "needs_review"),
+                      (and_(mapped, ~non_negative), "not_affected"),
+                      (mapped, "no_observed_match"), else_="not_assessed").label("impact_status")
+        impact_count = (select(func.count(distinct(m.c.cve_id))).where(and_(
+            m.c.source == p.c.source, m.c.name == p.c.name, m.c.arch == p.c.arch))
+            .correlate(p).scalar_subquery().label("impact_cve_count"))
+        approval = S.software_approvals
+        active_approval = exists(select(approval.c.id).where(and_(
+            approval.c.host_id == p.c.host_id, approval.c.source == p.c.source, approval.c.name == p.c.name,
+            approval.c.arch == p.c.arch, approval.c.version == p.c.version, approval.c.state == "active",
+            approval.c.valid_from <= at, approval.c.valid_until >= at, approval.c.ended_at.is_(None))))
+        values = [p.c.source, p.c.name, p.c.arch, p.c.version, category.label("category"),
+                  func.coalesce(S.software_classifications.c.product_name, "").label("product_name"),
+                  func.coalesce(S.software_classifications.c.publisher, "").label("publisher"),
+                  case((category == "business_app", case((active_approval, "active"), else_="not_active")),
+                       (category.in_(("os_package", "development_dependency")), "not_required"),
+                       else_="classification_required").label("approval_status"), impact, impact_count]
+        from_clause = p.outerjoin(S.software_classifications, and_(
+            S.software_classifications.c.source == p.c.source,
+            S.software_classifications.c.name == p.c.name,
+            S.software_classifications.c.arch == p.c.arch))
+        if include_request_state:
+            request, target = S.software_requests, S.software_request_hosts
+            request_scope = request.join(target, target.c.request_id == request.c.id)
+            request_predicates = [target.c.host_id == p.c.host_id, request.c.source == p.c.source,
+                request.c.name == p.c.name, request.c.arch == p.c.arch, request.c.version == p.c.version]
+            if requester_id is not None:
+                request_predicates.append(request.c.requester_id == requester_id)
+            latest_status = (select(request.c.status).select_from(request_scope).where(and_(*request_predicates))
+                             .order_by(request.c.created_at.desc(), request.c.id.desc()).limit(1)
+                             .correlate(p).scalar_subquery().label("request_status"))
+            latest_id = (select(request.c.id).select_from(request_scope).where(and_(*request_predicates))
+                         .order_by(request.c.created_at.desc(), request.c.id.desc()).limit(1)
+                         .correlate(p).scalar_subquery().label("request_id"))
+            values.extend([latest_status, latest_id])
+        stmt = select(*values).select_from(from_clause).where(p.c.host_id == host_id)
+        with self._conn() as conn:
+            rows = [dict(row) for row in conn.execute(stmt).mappings()]
+        for row in rows:
+            if "request_id" in row:
+                row["request_no"] = f"SW-{row.pop('request_id'):06d}" if row["request_id"] is not None else None
+        rows.sort(key=lambda row: (row["name"].casefold(), row["source"], row["arch"], row["version"]))
+        return rows
+
     def get_software_classification(self, source: str, name: str, arch: str) -> dict[str, Any] | None:
         with self._conn() as c:
             row = c.execute(select(S.software_classifications).where(and_(
@@ -847,14 +908,46 @@ class SqlInventoryRepository(InventoryRepository):
 
     def list_software_requests(self, *, requester_id: str | None = None, status: str | None = None, q: str = "",
                                unassigned: bool = False, overdue_before: str | None = None,
-                               offset: int = 0, limit: int = 50) -> tuple[int, list[dict[str, Any]]]:
+                               offset: int = 0, limit: int = 50, assignee_id: str | None = None,
+                               pending: bool = False, sort: str | None = None,
+                               direction: str = "asc", security_impact: str | None = None) -> tuple[int, list[dict[str, Any]]]:
         t, u, assignee = S.software_requests, S.users.alias("requester"), S.users.alias("assignee")
-        stmt = (select(t, u.c.username.label("requester_name"), assignee.c.username.label("assignee_name"))
+        targets, p = S.software_request_hosts, S.installed_packages
+        m, v = S.vulnerability_product_matches, S.vulnerability_match_versions
+        target_packages = targets.join(p, and_(p.c.host_id == targets.c.host_id,
+            p.c.source == t.c.source, p.c.name == t.c.name, p.c.arch == t.c.arch, p.c.version == t.c.version))
+        mapped_from = target_packages.join(m, and_(m.c.source == t.c.source, m.c.name == t.c.name,
+            m.c.arch == t.c.arch)).outerjoin(v, and_(v.c.cve_id == m.c.cve_id, v.c.source == m.c.source,
+            v.c.name == m.c.name, v.c.arch == m.c.arch, v.c.version == p.c.version))
+        confirmed_count = (select(func.count(distinct(m.c.cve_id))).select_from(mapped_from).where(and_(
+            targets.c.request_id == t.c.id, m.c.status == "affected_confirmed", v.c.cve_id.is_not(None)))
+            .correlate(t).scalar_subquery())
+        review_count = (select(func.count(distinct(m.c.cve_id))).select_from(mapped_from).where(and_(
+            targets.c.request_id == t.c.id, m.c.status == "needs_review"))
+            .correlate(t).scalar_subquery())
+        mapped_count = (select(func.count(distinct(m.c.cve_id))).select_from(mapped_from).where(
+            targets.c.request_id == t.c.id).correlate(t).scalar_subquery())
+        non_negative_count = (select(func.count(distinct(m.c.cve_id))).select_from(mapped_from).where(and_(
+            targets.c.request_id == t.c.id, m.c.status != "not_affected"))
+            .correlate(t).scalar_subquery())
+        security = case((confirmed_count > 0, "confirmed"), (review_count > 0, "needs_review"),
+                        (mapped_count == 0, "not_assessed"), (non_negative_count == 0, "not_affected"),
+                        else_="no_observed_match").label("security_impact")
+        host_count = (select(func.count()).select_from(targets).where(targets.c.request_id == t.c.id)
+                      .correlate(t).scalar_subquery().label("host_count"))
+        stmt = (select(t, u.c.username.label("requester_name"), assignee.c.username.label("assignee_name"),
+                       host_count, security, mapped_count.label("security_cve_count"))
                 .select_from(t.join(u, t.c.requester_id == u.c.id).outerjoin(assignee, t.c.assignee_id == assignee.c.id)))
         if requester_id:
             stmt = stmt.where(t.c.requester_id == requester_id)
+        if assignee_id:
+            stmt = stmt.where(t.c.assignee_id == assignee_id)
         if status:
             stmt = stmt.where(t.c.status == status)
+        if pending:
+            stmt = stmt.where(t.c.status.in_(("submitted", "reviewing")))
+        if security_impact:
+            stmt = stmt.where(security == security_impact)
         if unassigned:
             stmt = stmt.where(t.c.assignee_id.is_(None))
         if overdue_before:
@@ -862,21 +955,42 @@ class SqlInventoryRepository(InventoryRepository):
                               t.c.status.in_(("submitted", "reviewing", "needs_changes")))
         needle = q.strip().casefold()
         if needle:
+            request_no = re.fullmatch(r"sw-([0-9]{1,20})", needle)
+            if request_no:
+                request_number = int(request_no.group(1))
+                request_id_match = t.c.id == request_number if request_number <= 2_147_483_647 else t.c.id == -1
+            else:
+                request_id_match = cast(t.c.id, String).like(
+                    f"%{_escape_like(needle.removeprefix('sw-'))}%", escape="\\")
             stmt = stmt.where(or_(func.lower(t.c.name).like(f"%{_escape_like(needle)}%", escape="\\"),
                                   func.lower(t.c.product_name).like(f"%{_escape_like(needle)}%", escape="\\"),
                                   func.lower(u.c.username).like(f"%{_escape_like(needle)}%", escape="\\"),
-                                  cast(t.c.id, String).like(f"%{_escape_like(needle.removeprefix('sw-'))}%", escape="\\")))
+                                  request_id_match))
         subquery = stmt.with_only_columns(t.c.id).order_by(None).subquery()
+        pending_order = case((t.c.status.in_(("submitted", "reviewing")), 0), else_=1)
+        if sort is None:
+            ordering = [pending_order.asc(), t.c.due_at.asc().nulls_last(), t.c.updated_at.desc(), t.c.id.desc()]
+        else:
+            if sort not in {"product", "status", "security", "targets", "requester", "assignee", "due", "request_no"}:
+                raise ValueError("unsupported software request sort")
+            if direction not in {"asc", "desc"}:
+                raise ValueError("unsupported software request sort direction")
+            security_rank = case((security == "confirmed", 0), (security == "needs_review", 1),
+                (security == "not_assessed", 2), (security == "no_observed_match", 3),
+                (security == "not_affected", 4), else_=5)
+            key = {"product": func.lower(t.c.product_name + " " + t.c.name), "status": t.c.status,
+                   "security": security_rank, "targets": host_count, "requester": func.lower(u.c.username),
+                   "assignee": func.lower(assignee.c.username), "due": t.c.due_at,
+                   "request_no": t.c.id}[sort]
+            ordered_key = key.asc() if direction == "asc" else key.desc()
+            ordering = [pending_order.asc(), ordered_key.nulls_last(), t.c.updated_at.desc(), t.c.id.desc()]
         with self._conn() as c:
             total = int(c.execute(select(func.count()).select_from(subquery)).scalar_one())
-            rows = c.execute(stmt.order_by(t.c.created_at.desc(), t.c.id.desc()).offset(offset).limit(limit)).mappings().all()
+            rows = c.execute(stmt.order_by(*ordering).offset(offset).limit(limit)).mappings().all()
             result = []
             for row in rows:
                 data = dict(row)
                 data["request_no"] = f"SW-{data['id']:06d}"
-                count = c.execute(select(func.count()).select_from(S.software_request_hosts).where(
-                    S.software_request_hosts.c.request_id == data["id"])).scalar_one()
-                data["host_count"] = int(count)
                 result.append(data)
             return total, result
 
@@ -930,45 +1044,88 @@ class SqlInventoryRepository(InventoryRepository):
                     state="revoked", ended_at=at, end_reason=reason))
 
     # --- CVE / KEV -------------------------------------------------------
-    def _vulnerability_query(self, q: str, kev_only: bool, impact_status: str | None, host_id: str | None = None):
+    def _vulnerability_query(self, q: str, kev_only: bool, impact_status: str | None,
+                             host_id: str | None = None, product_source: str | None = None,
+                             product_name: str | None = None, product_arch: str | None = None,
+                             product_version: str | None = None):
         cve, kev = S.vulnerability_cves, S.kev_entries
         m, v, p = S.vulnerability_product_matches, S.vulnerability_match_versions, S.installed_packages
-        mapped_installs = (select(p.c.host_id).select_from(m.join(p, and_(p.c.source == m.c.source,
-                p.c.name == m.c.name, p.c.arch == m.c.arch)))
-            .where(and_(m.c.cve_id == cve.c.cve_id, p.c.host_id == host_id))) if host_id else None
-        has_mapped_install = exists(mapped_installs) if mapped_installs is not None else None
-        confirmed = (select(p.c.host_id).select_from(m.join(v, and_(v.c.cve_id == m.c.cve_id,
-                v.c.source == m.c.source, v.c.name == m.c.name, v.c.arch == m.c.arch))
-                .join(p, and_(p.c.source == v.c.source, p.c.name == v.c.name, p.c.arch == v.c.arch,
-                              p.c.version == v.c.version)))
-            .where(and_(m.c.cve_id == cve.c.cve_id, m.c.status == "affected_confirmed",
-                        *(([p.c.host_id == host_id]) if host_id else []))))
-        has_confirmed = exists(confirmed)
-        if host_id:
-            host_mapping = m.join(p, and_(p.c.source == m.c.source, p.c.name == m.c.name, p.c.arch == m.c.arch))
-            host_product = and_(m.c.cve_id == cve.c.cve_id, p.c.host_id == host_id)
-            has_review = exists(select(m.c.cve_id).select_from(host_mapping).where(and_(host_product, m.c.status == "needs_review")))
-            has_mapping = has_mapped_install
-            has_non_negative_mapping = exists(select(m.c.cve_id).select_from(host_mapping).where(and_(host_product, m.c.status != "not_affected")))
+
+        def product_filters(mapping, package, *, include_host: bool = True):
+            conditions = [mapping.c.cve_id == cve.c.cve_id,
+                package.c.source == mapping.c.source, package.c.name == mapping.c.name,
+                package.c.arch == mapping.c.arch]
+            for column, value in ((mapping.c.source, product_source), (mapping.c.name, product_name),
+                                  (mapping.c.arch, product_arch), (package.c.version, product_version)):
+                if value is not None:
+                    conditions.append(column == value)
+            if include_host and host_id is not None:
+                conditions.append(package.c.host_id == host_id)
+            return conditions
+
+        mapped_from = m.join(p, and_(p.c.source == m.c.source, p.c.name == m.c.name,
+                                     p.c.arch == m.c.arch))
+        scoped_product = host_id is not None or any(value is not None for value in
+            (product_source, product_name, product_arch, product_version))
+        if scoped_product:
+            mapped_conditions = product_filters(m, p)
+            has_mapping = exists(select(m.c.cve_id).select_from(mapped_from).where(and_(*mapped_conditions)))
+            has_review = exists(select(m.c.cve_id).select_from(mapped_from).where(and_(
+                *mapped_conditions, m.c.status == "needs_review")))
+            has_non_negative = exists(select(m.c.cve_id).select_from(mapped_from).where(and_(
+                *mapped_conditions, m.c.status != "not_affected")))
         else:
-            has_review = exists(select(m.c.cve_id).where(and_(m.c.cve_id == cve.c.cve_id, m.c.status == "needs_review")))
             has_mapping = exists(select(m.c.cve_id).where(m.c.cve_id == cve.c.cve_id))
-            has_non_negative_mapping = exists(select(m.c.cve_id).where(and_(m.c.cve_id == cve.c.cve_id,
+            has_review = exists(select(m.c.cve_id).where(and_(m.c.cve_id == cve.c.cve_id,
+                m.c.status == "needs_review")))
+            has_non_negative = exists(select(m.c.cve_id).where(and_(m.c.cve_id == cve.c.cve_id,
                 m.c.status != "not_affected")))
+
+        confirmed_from = m.join(v, and_(v.c.cve_id == m.c.cve_id, v.c.source == m.c.source,
+            v.c.name == m.c.name, v.c.arch == m.c.arch)).join(p, and_(p.c.source == v.c.source,
+            p.c.name == v.c.name, p.c.arch == v.c.arch, p.c.version == v.c.version))
+        confirmed_conditions = product_filters(m, p)
+        has_confirmed = exists(select(m.c.cve_id).select_from(confirmed_from).where(and_(
+            *confirmed_conditions, m.c.status == "affected_confirmed")))
         impact = case((has_confirmed, "confirmed"), (has_review, "needs_review"),
-                      (and_(has_mapping, ~has_non_negative_mapping), "not_affected"),
+                      (and_(has_mapping, ~has_non_negative), "not_affected"),
                       (has_mapping, "no_observed_match"), else_="not_assessed").label("impact_status")
-        host_count = (select(func.count(distinct(p.c.host_id))).select_from(m.join(v, and_(v.c.cve_id == m.c.cve_id,
-                v.c.source == m.c.source, v.c.name == m.c.name, v.c.arch == m.c.arch))
-                .join(p, and_(p.c.source == v.c.source, p.c.name == v.c.name, p.c.arch == v.c.arch,
-                              p.c.version == v.c.version)))
-            .where(and_(m.c.cve_id == cve.c.cve_id, m.c.status == "affected_confirmed")).scalar_subquery().label("host_count"))
-        install_count = (select(func.count()).select_from(confirmed.subquery()).scalar_subquery().label("install_count"))
+
+        all_confirmed_from = m.join(v, and_(v.c.cve_id == m.c.cve_id, v.c.source == m.c.source,
+            v.c.name == m.c.name, v.c.arch == m.c.arch)).join(p, and_(p.c.source == v.c.source,
+            p.c.name == v.c.name, p.c.arch == v.c.arch, p.c.version == v.c.version))
+        legacy_conditions = product_filters(m, p, include_host=False)
+        confirmed_host_count = (select(func.count(distinct(p.c.host_id))).select_from(all_confirmed_from)
+            .where(and_(*legacy_conditions, m.c.status == "affected_confirmed"))
+            .correlate(cve).scalar_subquery().label("host_count"))
+        filtered_confirmed_host_count = (select(func.count(distinct(p.c.host_id))).select_from(all_confirmed_from)
+            .where(and_(*product_filters(m, p), m.c.status == "affected_confirmed"))
+            .correlate(cve).scalar_subquery().label("confirmed_host_count"))
+        install_count = (select(func.count()).select_from(all_confirmed_from)
+            .where(and_(*product_filters(m, p), m.c.status == "affected_confirmed"))
+            .correlate(cve).scalar_subquery().label("install_count"))
+
+        def mapped_host_count(status: str, *, unmatched: bool = False, label: str):
+            conditions = product_filters(m, p)
+            conditions.append(m.c.status == status)
+            if unmatched:
+                has_exact_version = exists(select(v.c.version).where(and_(v.c.cve_id == m.c.cve_id,
+                    v.c.source == m.c.source, v.c.name == m.c.name, v.c.arch == m.c.arch,
+                    v.c.version == p.c.version)))
+                conditions.append(~has_exact_version)
+            return (select(func.count(distinct(p.c.host_id))).select_from(mapped_from)
+                    .where(and_(*conditions)).correlate(cve).scalar_subquery().label(label))
+
+        review_host_count = mapped_host_count("needs_review", label="needs_review_host_count")
+        not_affected_host_count = mapped_host_count("not_affected", label="not_affected_host_count")
+        unmatched_host_count = mapped_host_count("affected_confirmed", unmatched=True,
+                                                  label="no_observed_match_host_count")
         stmt = select(cve.c.cve_id, cve.c.description, cve.c.published_at, cve.c.modified_at, cve.c.cvss_score,
                       cve.c.cvss_severity, cve.c.nvd_status, kev.c.vendor, kev.c.product, kev.c.date_added,
                       kev.c.due_date, kev.c.ransomware_use, kev.c.catalog_version, impact,
-                      host_count, install_count).select_from(cve.outerjoin(kev, kev.c.cve_id == cve.c.cve_id)
-                      )
+                      confirmed_host_count, filtered_confirmed_host_count, review_host_count,
+                      not_affected_host_count, unmatched_host_count, install_count).select_from(
+                          cve.outerjoin(kev, kev.c.cve_id == cve.c.cve_id))
         if q:
             pattern = f"%{_escape_like(q.casefold())}%"
             stmt = stmt.where(or_(func.lower(cve.c.cve_id).like(pattern, escape="\\"),
@@ -977,20 +1134,34 @@ class SqlInventoryRepository(InventoryRepository):
                                   func.lower(kev.c.product).like(pattern, escape="\\")))
         if kev_only:
             stmt = stmt.where(kev.c.cve_id.is_not(None))
-        if has_mapped_install is not None:
-            stmt = stmt.where(has_mapped_install)
+        if scoped_product:
+            stmt = stmt.where(has_mapping)
         if impact_status:
             stmt = stmt.where(impact == impact_status)
         return stmt, cve, kev
 
     def list_vulnerabilities(self, *, q: str = "", kev_only: bool = False, impact_status: str | None = None,
-                             offset: int = 0, limit: int = 50, host_id: str | None = None) -> tuple[int, list[dict[str, Any]]]:
-        stmt, cve, kev = self._vulnerability_query(q, kev_only, impact_status, host_id)
+                             offset: int = 0, limit: int = 50, host_id: str | None = None,
+                             product_source: str | None = None, product_name: str | None = None,
+                             product_arch: str | None = None, product_version: str | None = None) -> tuple[int, list[dict[str, Any]]]:
+        stmt, cve, kev = self._vulnerability_query(q, kev_only, impact_status, host_id, product_source,
+            product_name, product_arch, product_version)
         total_query = stmt.with_only_columns(cve.c.cve_id).order_by(None).subquery()
         priority = case((kev.c.cve_id.is_not(None), 0), else_=1)
+        if self._engine.dialect.name == "postgresql":
+            valid_score = cve.c.cvss_score.op("~")(r"^[0-9]+(\.[0-9]+)?$")
+            numeric_score = case((valid_score, cast(cve.c.cvss_score, Numeric())), else_=None)
+        else:
+            score_text = cve.c.cvss_score
+            valid_score = and_(score_text.is_not(None), score_text != "",
+                score_text.op("NOT GLOB")("*[^0-9.]*"),
+                func.length(score_text) - func.length(func.replace(score_text, ".", "")) <= 1,
+                func.replace(score_text, ".", "") != "")
+            numeric_score = case((valid_score, cast(score_text, Float())), else_=None)
+
         with self._conn() as c:
             total = int(c.execute(select(func.count()).select_from(total_query)).scalar_one())
-            rows = c.execute(stmt.order_by(priority, kev.c.date_added.desc(), cve.c.cvss_score.desc(),
+            rows = c.execute(stmt.order_by(priority, kev.c.date_added.desc(), numeric_score.desc().nulls_last(),
                                            cve.c.cve_id).offset(offset).limit(limit)).mappings().all()
             return total, [dict(r) for r in rows]
 
@@ -1013,13 +1184,19 @@ class SqlInventoryRepository(InventoryRepository):
                 versions = [r[0] for r in conn.execute(select(v.c.version).where(and_(v.c.cve_id == cve_id,
                     v.c.source == item["source"], v.c.name == item["name"], v.c.arch == item["arch"])).order_by(v.c.version))]
                 item["affected_versions"] = versions
-                stmt = (select(p.c.host_id, h.c.hostname, p.c.source, p.c.name, p.c.arch, p.c.version,
-                               S.assets.c.id.label("asset_id"), S.assets.c.asset_no.label("asset_no"))
-                        .select_from(p.join(h, h.c.host_id == p.c.host_id).outerjoin(S.assets, S.assets.c.host_id == p.c.host_id))
-                        .where(and_(p.c.source == item["source"], p.c.name == item["name"], p.c.arch == item["arch"])))
-                if item["status"] == "affected_confirmed" and versions:
-                    stmt = stmt.where(p.c.version.in_(versions))
-                item["installations"] = [dict(r) for r in conn.execute(stmt.order_by(h.c.hostname, p.c.version)).mappings()]
+                stmt = (select(p.c.host_id, h.c.hostname, h.c.last_seen, p.c.source, p.c.name, p.c.arch, p.c.version)
+                        .select_from(p.join(h, h.c.host_id == p.c.host_id))
+                        .where(and_(p.c.source == item["source"], p.c.name == item["name"], p.c.arch == item["arch"]))
+                        .order_by(h.c.hostname, p.c.version))
+                observed = [dict(r) for r in conn.execute(stmt).mappings()]
+                for installation in observed:
+                    installation["impact_status"] = (
+                        "confirmed" if item["status"] == "affected_confirmed" and installation["version"] in versions
+                        else "no_observed_match" if item["status"] == "affected_confirmed"
+                        else item["status"])
+                item["observed_installations"] = observed
+                item["installations"] = ([row.copy() for row in observed if row["impact_status"] == "confirmed"]
+                    if item["status"] == "affected_confirmed" and versions else [row.copy() for row in observed])
                 details.append(item)
             data["matches"] = details
             data["feed_status"] = [dict(r) for r in conn.execute(select(S.vulnerability_feed_status).order_by(

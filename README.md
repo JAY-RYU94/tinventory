@@ -155,6 +155,8 @@ swinventory-agent doctor --config "$env:ProgramData\swinventory\agent.json"     
 
 `/` (ID·비밀번호 로그인 또는 JWT·기존 토큰 접속, 탭을 닫으면 JWT가 지워짐). 빌드 없는 정적 파일을 서버가 직접 서빙한다.
 
+화면 코드는 `app.js`가 경로·세션 상태와 API 호출을 맡고, `ui-table.js`가 native HTML 표·페이지 내 정렬을, `ui-workflow.js`가 승인·소프트웨어·CVE 표의 표현을 맡도록 나뉘어 있다. `style.css`는 `tokens.css`, `base.css`, `layout.css`, `components.css`를 불러온다. AdminLTE 4.10.2 CSS는 `/vendor/`에서 자체 호스팅하며 런타임 외부 네트워크 의존성은 없다. AdminLTE와 포함된 Bootstrap의 MIT 라이선스 및 출처·무결성 정보는 `src/swinventory/server/web/vendor/`의 `LICENSE`와 `SOURCES.md`에 보존한다.
+
 | 화면 | 내용 |
 |---|---|
 | 개요 | 호스트 수, 수집 정상률, 재부팅 필요, 수집 오류, 수집 끊김, **커널 하한선 미달**, **IP 충돌**, **주의 포트 노출**, 커널 분포, 최근 변경 |
@@ -164,7 +166,9 @@ swinventory-agent doctor --config "$env:ProgramData\swinventory\agent.json"     
 | 네트워크 | IP·MAC 인벤토리(검색·충돌 표시·CSV), 열린 포트 요약(프로토콜·노출 범위·주의 포트 필터)과 포트별 호스트 목록(CSV) |
 | 변경 이력 | 유형·호스트·기간 필터, CSV |
 | AI 리포트 | 종합 분석 리포트 생성·조회·마크다운 저장·삭제, 근거 집계(facts) 확인 |
-| 취약점 | CISA KEV·NVD 자료, 호스트별 설치 근거, 관리자 영향 판정과 증거 |
+| 업무용 앱·승인 | source/name/arch 기준 분류, 실제 설치 대상·버전 기준 승인 상태와 요청 흐름 |
+| SW 사용 승인 | 요청자 본인 또는 관리자 권한 범위의 상태·보안 영향·담당자·처리 기한 |
+| 취약점 | CISA KEV·NVD 자료, exact 제품·버전 필터, 호스트별 설치·자산 담당자 근거와 영향 판정 |
 | 설정 | 커널 하한선 편집, AI 연결(엔드포인트·모델·키·추가 헤더·신뢰 영역·TLS) 설정과 연결 테스트 |
 
 호스트명·패키지명은 에이전트가 보낸 신뢰할 수 없는 값이라 화면은 `innerHTML` 없이 `textContent` 로만 그리고 CSP 헤더를 붙인다.
@@ -192,6 +196,16 @@ CSV 는 엑셀 수식 주입(`=`, `+`, `-`, `@` 로 시작하는 셀)을 막는�
 관리자 로그인으로 **KEV·NVD 갱신**을 실행하면 CISA KEV 전체와 NVD 2.0의 최근 120일 수정분을 갱신한다. 한 번의 요청은 NVD 200건 페이지 하나를 가져오며, `partial`이면 다시 실행해 다음 페이지를 이어 받는다. 실패해도 마지막 성공 데이터와 NVD 커서는 유지된다.
 
 기존 PostgreSQL DB의 `vulnerability_feed_status.data_version`이 `VARCHAR(64)`이면 서버 시작 시 저장된 값을 보존하며 `TEXT`로 확장한다. 이 변경을 배포한 뒤 서버를 재시작해 마이그레이션을 적용한다. NVD의 페이지 커서와 완료 상태는 길이를 자르지 않고 유지한다.
+
+## 업무용 소프트웨어 승인과 CVE 영향
+
+분류 키는 수집 출처(`source`), 패키지 이름(`name`), 아키텍처(`arch`)다. 같은 이름이라도 출처나 아키텍처가 다르면 별도 제품으로 다룬다. 설치 요약과 승인 판정은 여기에 호스트와 정확한 버전을 더해 조회한다. 분류되지 않은 제품은 `classification_required`이며, 출처 이름만 보고 업무용·개발용으로 추정하지 않는다. 명시된 OS 패키지와 개발 의존성만 승인 대상이 아닌 `not_required`로 표시한다.
+
+활성 승인에는 해당 호스트와 source/name/arch/version이 모두 맞는 현재 승인만 포함된다. 철회되었거나 유효 기간이 지난 승인은 `not_active`다. 현재 요청 상태는 승인 여부와 별도 필드로 표시되므로 `needs_changes` 같은 요청이 기존 승인을 지우거나 대신하지 않는다. 설치된 버전이 CVE의 확정 영향 버전과 일치하면 `confirmed`, 검토 대기 매핑이 있으면 `needs_review`, 모든 연결 판정이 명시적으로 `not_affected`이면 `not_affected`, 제품 매핑은 있지만 설치 버전이 확정 영향 버전과 다르면 `no_observed_match`, 연결된 CVE 판정이 없으면 `not_assessed`다. 마지막 두 상태를 안전 판정으로 취급하지 않는다.
+
+조회 역할은 호스트 소프트웨어 요약을 볼 수 있지만 승인 요청 상태와 요청 번호는 받지 않는다. 요청 권한 계정은 본인 요청만, 관리자는 전체 요청을 조회한다. `assigned_to_me=true`는 관리자 세션의 담당자 필터이며 기존 `mine=true`는 요청자 본인 필터다. 기본 큐는 `submitted`·`reviewing`을 먼저 두고 처리 기한 오름차순(기한 없음은 뒤), 갱신 시각과 요청 ID로 안정적으로 정렬한다. 정렬은 `sort=product|status|security|targets|requester|assignee|due|request_no` 및 `direction=asc|desc`를 쓸 수 있고, 보안 상태 필터는 `security_impact`에 다섯 영향 상태 중 하나를 지정한다. pending 범위는 `pending=true` 또는 `scope=pending`이며 `submitted`·`reviewing`만 포함한다.
+
+취약점 목록의 `product_source`, `product_name`, `product_arch`, `product_version`, `host`는 정확 일치 필터다. `q` 텍스트 검색과 별도이며, 빈 설치 버전도 정확한 빈 문자열로 조회할 수 있다. 목록의 영향별 호스트 수는 실제 설치와 매핑 근거를 기준으로 고유 호스트 수를 집계한다. `not_assessed`의 전체 호스트 수는 기준이 모호해 반환하지 않는다. CVE 상세는 기존 `installations` 근거를 유지하고 `observed_installations`에 해당 제품의 다른 설치 버전과 개별 판정을 추가한다.
 
 ## 자산 관리: VM/물리·시리얼·도메인·IP
 
@@ -327,12 +341,15 @@ base URL 의 scheme, 호스트 또는 포트를 바꾸면 기존 추가 헤더 �
 | GET | `/v1/kernels` , `/v1/kernels/hosts?reboot_required=&running=&compliant=&tag=&q=&format=csv` | 커널 분포 / 호스트별 커널(`min_kernel`·`compliant` 포함) |
 | GET | `/v1/software-hosts?q=&host=` | 서버별 설치 항목 수(패키지 본문 제외), 서버·패키지 이름 필터 |
 | GET | `/v1/software?q=` , `/v1/software/{name}?host=&version=&below=&format=csv` | 패키지 검색 / 버전 분포 + 설치 호스트(`version`=정확히 일치, `below`=그 버전 미만 — 분포는 선택한 서버 범위 전체, version·below는 호스트 목록·CSV 만 좁힌다) |
+| GET | `/v1/software-products?q=&category=` , `/v1/hosts/{id}/software-summary` | 업무용 앱 분류 목록 / 호스트의 source/name/arch/version별 분류·승인·CVE 영향 요약(read) |
+| GET | `/v1/software-requests?pending=&assigned_to_me=&security_impact=&sort=&direction=&page=` | SW 승인 요청 큐. 요청자는 본인 요청만, 관리자는 전체 또는 담당자 본인 필터(request/admin) |
+| GET, POST | `/v1/software-requests` , `/v1/software-requests/{id}/actions` | 요청 생성·본인 요청 조회(request) / 배정·보완·승인·반려·철회·승인 취소(권한별) |
 | GET | `/v1/events?host=&type=&since=&limit=&format=csv` | 변경 이력 |
 | GET | `/v1/network/ips?host=&q=&tag=&conflicts=&format=csv` , `/v1/network/ip-conflicts` | IP·MAC 인벤토리(`duplicate`=IP 충돌) / 충돌 목록 |
 | GET | `/v1/network/ports?host=&proto=&exposure=` , `/v1/network/listening?host=&proto=&port=&exposure=&notable=&tag=&q=&format=csv` | 포트 요약(호스트 수·외부 바인딩 수) / 호스트×포트 평면 목록(감사·내보내기). `exposure`: any·specific·loopback·exposed(루프백 제외) |
 | GET, PUT | `/v1/settings/kernel-policy` | 커널 하한선 조회(read) / 저장(admin) |
 | GET, PUT, POST | `/v1/settings/ai` , `/v1/settings/ai/test` | AI 연결 설정 조회·저장·연결 테스트 (admin) |
-| GET | `/v1/vulnerability-feeds` , `/v1/vulnerabilities?host=&q=&kev=&impact=&page=` , `/v1/vulnerabilities/{cve_id}` | 피드 상태(read) / CVE 검색·호스트별 영향 목록과 상세(read) |
+| GET | `/v1/vulnerability-feeds` , `/v1/vulnerabilities?host=&product_source=&product_name=&product_arch=&product_version=&q=&kev=&impact=&page=` , `/v1/vulnerabilities/{cve_id}` | 피드 상태(read) / 정확 제품·버전·호스트 범위의 CVE 목록과 설치 상세(read) |
 | POST | `/v1/vulnerabilities/sync` | CISA KEV 전체 및 NVD 다음 페이지 갱신(관리자 로그인 세션) |
 | PUT | `/v1/vulnerabilities/matches` | 설치 제품별 CVE 영향 상태와 근거 저장(admin) |
 | GET | `/v1/reports/facts` | AI 에 전달되는 집계(read) |

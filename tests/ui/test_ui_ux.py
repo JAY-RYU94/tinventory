@@ -961,7 +961,7 @@ def test_bars_are_real_buttons_operable_by_keyboard(site, make_page):
     version = bars.nth(1).locator(".name").inner_text()
     page.keyboard.press("Enter")
     assert hash_query(page) == {"running": [version]}
-    expect(page.get_by_label("실행 중 커널")).to_have_value(version)
+    expect(page.get_by_label("실행 중 커널", exact=True)).to_have_value(version)
     expect(page.locator(".bars .bar.active")).to_have_count(1)
     # 덜 중요한 곳: 개요의 커널 분포·이미지 태그 분포도 버튼
     open_route(page, site.base, "#/overview")
@@ -1622,8 +1622,11 @@ def test_events_filter_by_hostname_not_by_raw_host_id(site, make_page):
     host_id = next(h["host_id"] for h in host_id if h["hostname"] == "db10.corp.example")
     expect(page).to_have_url(re.compile(f"host={host_id}"))
     expect(page.get_by_label("호스트 (이름으로 선택)")).to_have_value("db10.corp.example")      # 주소엔 id, 화면엔 이름
-    hosts = set(page.locator("tbody tr td:nth-child(2)").all_inner_texts())
-    assert hosts == {"db10.corp.example"}, hosts
+    expected_events = call(site.base, f"/v1/events?host={host_id}&page=1&page_size=200")
+    expected_hosts = [event["hostname"] for event in expected_events["items"]]
+    assert expected_hosts and set(expected_hosts) == {"db10.corp.example"}, expected_hosts
+    host_cells = page.locator("tbody tr td:nth-child(2)")
+    expect(host_cells).to_have_text(expected_hosts)
     picker = page.get_by_label("호스트 (이름으로 선택)")
     picker.fill("없는-호스트")
     picker.press("Tab")

@@ -13,6 +13,7 @@ from swinventory.server.timeutil import normalize_ts
 
 _CATEGORIES = {"business_app", "os_package", "development_dependency", "needs_review"}
 _STATUSES = {"submitted", "reviewing", "needs_changes", "approved", "rejected", "withdrawn"}
+_REQUEST_SORTS = {"product", "status", "security", "targets", "requester", "assignee", "due", "request_no"}
 
 
 class Input(BaseModel):
@@ -119,7 +120,10 @@ def build_router(repo: InventoryRepository, accounts: Accounts, require_read: Ca
                  require_request: Callable[..., None], require_admin: Callable[..., None],
                  caller_role: Callable[..., str], clock: Callable) -> APIRouter:
     router = APIRouter(prefix="/v1")
-    approval_role = caller_role
+
+    def approval_role(role: str = Depends(caller_role)) -> str:
+        return role
+
     approval_role.required_role = "request"  # 관리자는 상위 권한으로 허용되며 조회 역할은 차단된다.
 
     @router.get("/software-products", dependencies=[Depends(require_read)])
@@ -129,6 +133,20 @@ def build_router(repo: InventoryRepository, accounts: Accounts, require_read: Ca
             raise HTTPException(422, "분류값을 확인하세요.")
         total, items = repo.list_software_products(q.strip(), category, (page - 1) * page_size, page_size)
         return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+    @router.get("/hosts/{host_id}/software-summary", dependencies=[Depends(require_read)])
+    def host_software_summary(host_id: str, role: str = Depends(caller_role),
+                              authorization: str | None = Header(None)):
+        host = repo.get_host(host_id)
+        if host is None:
+            raise HTTPException(404, "호스트를 찾을 수 없습니다.")
+        include_request_state = role in {"admin", "request"}
+        requester_id = None
+        if role == "request":
+            requester_id = _actor(accounts, authorization, "request")["user_id"]
+        items = repo.host_software_summary(host_id, normalize_ts(clock()), requester_id=requester_id,
+                                           include_request_state=include_request_state)
+        return {"host_id": host_id, "last_seen": host.last_seen, "items": items}
 
     @router.get("/software-classification-history", dependencies=[Depends(require_read)])
     def classification_history(source: str = Query(min_length=1, max_length=64),
@@ -225,19 +243,44 @@ def build_router(repo: InventoryRepository, accounts: Accounts, require_read: Ca
     @router.get("/software-requests", dependencies=[Depends(require_read)])
     def requests(role: str = Depends(approval_role), authorization: str | None = Header(None),
                  status: str | None = Query(None), q: str = Query("", max_length=200),
-                 mine: bool = False, unassigned: bool = False, overdue: bool = False,
+                 scope: str | None = Query(None), pending: bool = False, mine: bool = False,
+                 assigned_to_me: bool = False, unassigned: bool = False, overdue: bool = False,
+                 sort: str | None = Query(None), direction: str = Query("asc", pattern="^(asc|desc)$"),
+                 security_impact: str | None = Query(None),
                  page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200)):
         if role == "read":
             raise HTTPException(403, "요청 권한 또는 관리자 권한이 필요합니다.")
+        if status == "pending":
+            pending, status = True, None
+        if scope is not None and scope != "pending":
+            raise HTTPException(422, "요청 범위를 확인하세요.")
+        if scope == "pending":
+            pending = True
+        if pending and status is not None:
+            raise HTTPException(422, "pending 범위와 단일 상태 필터는 함께 사용할 수 없습니다.")
         if status is not None and status not in _STATUSES:
             raise HTTPException(422, "요청 상태를 확인하세요.")
+        if sort is not None and sort not in _REQUEST_SORTS:
+            raise HTTPException(422, "정렬 기준을 확인하세요.")
+        if security_impact is not None and security_impact not in {"confirmed", "needs_review", "not_affected",
+                                                                    "no_observed_match", "not_assessed"}:
+            raise HTTPException(422, "보안 영향 상태를 확인하세요.")
+        if assigned_to_me and role != "admin":
+            raise HTTPException(403, "관리자 담당자 필터는 관리자만 사용할 수 있습니다.")
+        if assigned_to_me and mine:
+            raise HTTPException(422, "요청자 본인과 담당자 본인 필터는 함께 사용할 수 없습니다.")
         owner = None
         if role == "request" or mine:
             actor = _actor(accounts, authorization, "request" if role == "request" else "admin")
             owner = actor["user_id"]
+        assignee = None
+        if assigned_to_me:
+            assignee = _actor(accounts, authorization, "admin")["user_id"]
         cutoff = normalize_ts(clock()) if overdue else None
         total, items = repo.list_software_requests(requester_id=owner, status=status, q=q.strip(),
-            unassigned=unassigned, overdue_before=cutoff, offset=(page - 1) * page_size, limit=page_size)
+            unassigned=unassigned, overdue_before=cutoff, offset=(page - 1) * page_size, limit=page_size,
+            assignee_id=assignee, pending=pending, sort=sort, direction=direction,
+            security_impact=security_impact)
         return {"items": items, "total": total, "page": page, "page_size": page_size}
 
     @router.get("/software-requests/{request_id}", dependencies=[Depends(require_read)])

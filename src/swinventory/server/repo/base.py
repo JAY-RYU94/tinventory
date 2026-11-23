@@ -206,6 +206,10 @@ class InventoryRepository(ABC):
     def list_software_products(self, q: str, category: str | None, offset: int, limit: int) -> tuple[int, list[dict[str, Any]]]: ...
 
     @abstractmethod
+    def host_software_summary(self, host_id: str, at: str, *, requester_id: str | None = None,
+                              include_request_state: bool = False) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
     def get_software_classification(self, source: str, name: str, arch: str) -> dict[str, Any] | None: ...
 
     @abstractmethod
@@ -232,7 +236,10 @@ class InventoryRepository(ABC):
 
     @abstractmethod
     def list_software_requests(self, *, requester_id: str | None, status: str | None, q: str,
-                               unassigned: bool, overdue_before: str | None, offset: int, limit: int) -> tuple[int, list[dict[str, Any]]]: ...
+                               unassigned: bool, overdue_before: str | None, offset: int, limit: int,
+                               assignee_id: str | None = None, pending: bool = False,
+                               sort: str | None = None, direction: str = "asc",
+                               security_impact: str | None = None) -> tuple[int, list[dict[str, Any]]]: ...
 
     @abstractmethod
     def get_software_request(self, request_id: int) -> dict[str, Any] | None: ...
@@ -245,7 +252,9 @@ class InventoryRepository(ABC):
 
     @abstractmethod
     def list_vulnerabilities(self, *, q: str, kev_only: bool, impact_status: str | None,
-                             offset: int, limit: int, host_id: str | None = None) -> tuple[int, list[dict[str, Any]]]: ...
+                             offset: int, limit: int, host_id: str | None = None,
+                             product_source: str | None = None, product_name: str | None = None,
+                             product_arch: str | None = None, product_version: str | None = None) -> tuple[int, list[dict[str, Any]]]: ...
 
     @abstractmethod
     def vulnerability_detail(self, cve_id: str) -> dict[str, Any] | None: ...

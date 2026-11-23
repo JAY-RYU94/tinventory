@@ -22,7 +22,7 @@ swinventory-agent = "swinventory.agent.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"swinventory.server" = ["web/*"]
+"swinventory.server" = ["web/*", "web/vendor/**/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]

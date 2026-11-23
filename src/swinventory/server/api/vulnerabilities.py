@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from swinventory.server.accounts import Accounts
 from swinventory.server.api.models import has_control
+from swinventory.server.assets import AssetService
 from swinventory.server.repo.base import ConflictError, InventoryRepository
 from swinventory.server.timeutil import normalize_ts
 from swinventory.server.vulnerabilities import VulnerabilityFeedService
@@ -75,12 +76,19 @@ def build_router(repo: InventoryRepository, accounts: Accounts, feeds: Vulnerabi
 
     @router.get("/vulnerabilities", dependencies=[Depends(require_read)])
     def vulnerabilities(q: str = Query("", max_length=200), kev: bool = False,
-                        impact: str | None = Query(None), host: str | None = Query(None, max_length=128), page: int = Query(1, ge=1),
+                        impact: str | None = Query(None), host: str | None = Query(None, max_length=128),
+                        product_source: str | None = Query(None, min_length=1, max_length=64),
+                        product_name: str | None = Query(None, min_length=1, max_length=512),
+                        product_arch: str | None = Query(None, max_length=32),
+                        product_version: str | None = Query(None, max_length=256),
+                        page: int = Query(1, ge=1),
                         page_size: int = Query(50, ge=1, le=200)):
         if impact is not None and impact not in _IMPACT:
             raise HTTPException(422, "영향 상태를 확인하세요.")
         total, items = repo.list_vulnerabilities(q=q.strip(), kev_only=kev, impact_status=impact,
-            offset=(page - 1) * page_size, limit=page_size, host_id=host)
+            offset=(page - 1) * page_size, limit=page_size, host_id=host,
+            product_source=product_source, product_name=product_name, product_arch=product_arch,
+            product_version=product_version)
         return {"items": items, "total": total, "page": page, "page_size": page_size,
                 "feeds": repo.vulnerability_feed_status()}
 
@@ -91,6 +99,13 @@ def build_router(repo: InventoryRepository, accounts: Accounts, feeds: Vulnerabi
         row = repo.vulnerability_detail(cve_id)
         if row is None:
             raise HTTPException(404, "CVE를 찾을 수 없습니다.")
+        book = AssetService(repo).book()
+        for match in row["matches"]:
+            for field in ("installations", "observed_installations"):
+                for installation in match[field]:
+                    asset = book.host_view(installation["host_id"])
+                    installation.update({key: asset[key] for key in
+                        ("asset_id", "asset_no", "primary_owner", "secondary_owner")})
         return row
 
     @router.put("/vulnerabilities/matches", dependencies=[Depends(require_admin)])

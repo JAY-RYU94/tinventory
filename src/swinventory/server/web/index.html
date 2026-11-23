@@ -5,30 +5,41 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>swinventory · 서버 소프트웨어·커널 현황</title>
   <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/vendor/admin-lte/4.10.2/css/adminlte.min.css">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header id="top" hidden>
-    <div class="brand-row"><strong class="brand">swinventory</strong><button id="nav-toggle" type="button" aria-label="메뉴" aria-expanded="false" aria-controls="nav">메뉴</button></div>
-    <nav id="nav" aria-label="주 메뉴">
-      <div class="nav-group"><span class="nav-label">현황</span><a href="#/overview" data-route="overview">개요</a></div>
-      <div class="nav-group"><span class="nav-label">인벤토리</span>
-        <a href="#/hosts" data-route="hosts">호스트</a><a href="#/assets" data-route="assets">자산</a>
-        <a href="#/software" data-route="software">소프트웨어</a><a href="#/kernels" data-route="kernels">커널</a>
-        <a href="#/containers" data-route="containers">컨테이너</a><a href="#/network" data-route="network">네트워크</a></div>
-      <div class="nav-group"><span class="nav-label">보안·승인</span>
-        <a href="#/business-apps" data-route="business-apps">업무용 앱</a>
-        <a href="#/sw-requests" data-route="sw-requests" data-request hidden>SW 사용 승인</a>
-        <a href="#/cves" data-route="cves">취약점</a></div>
-      <div class="nav-group"><span class="nav-label">운영</span>
-        <a href="#/events" data-route="events">변경 이력</a><a href="#/reports" data-route="reports">AI 리포트</a><a href="#/enroll" data-route="enroll">서버 등록</a></div>
-      <div class="nav-group"><span class="nav-label">관리</span>
-        <a href="#/users" data-route="users" data-admin>사용자 관리</a><a href="#/tokens" data-route="tokens" data-admin>API 토큰</a><a href="#/settings" data-route="settings">설정</a></div>
-      <div class="nav-group mobile-personal"><span class="nav-label">계정</span><a href="#/accounts" data-route="accounts">내 계정</a></div>
-    </nav>
-    <div class="account-tools"><a href="#/accounts" id="my-account">내 계정</a><span id="role" class="badge" hidden></span><button id="logout" type="button" class="link">로그아웃</button></div>
-  </header>
-  <main id="app"></main>
+  <a class="skip-link" href="#app">본문으로 건너뛰기</a>
+  <div class="app-wrapper">
+    <header id="top" class="app-sidebar" hidden>
+      <div class="brand-row sidebar-brand"><strong class="brand">swinventory</strong><button id="nav-toggle" type="button" aria-label="메뉴" aria-expanded="false" aria-controls="nav">메뉴</button></div>
+      <div class="sidebar-wrapper">
+        <nav id="nav" class="sidebar-menu" aria-label="주 메뉴">
+          <div class="nav-group"><span class="nav-label nav-header">현황</span><a class="nav-link" href="#/overview" data-route="overview">개요</a></div>
+          <div class="nav-group"><span class="nav-label nav-header">인벤토리</span>
+            <a class="nav-link" href="#/hosts" data-route="hosts">호스트</a><a class="nav-link" href="#/assets" data-route="assets">자산</a>
+            <a class="nav-link" href="#/software" data-route="software">소프트웨어</a><a class="nav-link" href="#/kernels" data-route="kernels">커널</a>
+            <a class="nav-link" href="#/containers" data-route="containers">컨테이너</a><a class="nav-link" href="#/network" data-route="network">네트워크</a></div>
+          <div class="nav-group"><span class="nav-label nav-header">보안·승인</span>
+            <a class="nav-link" href="#/business-apps" data-route="business-apps">업무용 앱</a>
+            <a class="nav-link" href="#/sw-requests" data-route="sw-requests" data-request hidden>SW 사용 승인</a>
+            <a class="nav-link" href="#/cves" data-route="cves">취약점</a></div>
+          <div class="nav-group"><span class="nav-label nav-header">운영</span>
+            <a class="nav-link" href="#/events" data-route="events">변경 이력</a><a class="nav-link" href="#/reports" data-route="reports">AI 리포트</a><a class="nav-link" href="#/enroll" data-route="enroll">서버 등록</a></div>
+          <div class="nav-group"><span class="nav-label nav-header">관리</span>
+            <a class="nav-link" href="#/users" data-route="users" data-admin>사용자 관리</a><a class="nav-link" href="#/tokens" data-route="tokens" data-admin>API 토큰</a><a class="nav-link" href="#/settings" data-route="settings">설정</a></div>
+          <div class="nav-group mobile-personal"><span class="nav-label nav-header">계정</span><a class="nav-link" href="#/accounts" data-route="accounts">내 계정</a></div>
+        </nav>
+      </div>
+    </header>
+    <header id="workspace-bar" class="app-header">
+      <span class="workspace-label">서버 자산 운영</span>
+      <div class="account-tools"><span id="role" class="badge" hidden></span><a href="#/accounts" id="my-account">내 계정</a><button id="logout" type="button" class="link">로그아웃</button></div>
+    </header>
+    <div class="app-main"><main id="app" class="app-content" tabindex="-1"></main></div>
+  </div>
+  <script src="/ui-table.js"></script>
+  <script src="/ui-workflow.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

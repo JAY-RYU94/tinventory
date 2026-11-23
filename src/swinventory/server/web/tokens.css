@@ -1,0 +1,67 @@
+:root {
+  color-scheme: light;
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Segoe UI", sans-serif;
+  --lte-sidebar-width: 224px;
+  --bg: #fff;
+  --panel: #fff;
+  --toolbar-bg: #f3f4f6;
+  --text: #24292f;
+  --muted: #626b75;
+  --line: #d0d7de;
+  --control-line: #8c959f;
+  --accent: #0969da;
+  --accent-hover: #0550ae;
+  --on-accent: #fff;
+  --ok: #24292f;
+  --warn: #24292f;
+  --err: #b42318;
+  --ok-bg: #f3f4f6;
+  --warn-bg: #f3f4f6;
+  --err-bg: #fff0ee;
+  --muted-bg: #f3f4f6;
+  --bar: #8c959f;
+  --sidebar-bg: #24292f;
+  --sidebar-text: #e6edf3;
+  --sidebar-muted: #afb8c1;
+
+  --bs-font-sans-serif: var(--font-sans);
+  --bs-body-font-family: var(--font-sans);
+  --bs-body-font-size: 14px;
+  --bs-body-line-height: 1.5;
+  --bs-body-color: var(--text);
+  --bs-body-bg: var(--bg);
+  --bs-link-color: var(--accent);
+  --bs-link-hover-color: #0550ae;
+  --bs-border-color: var(--line);
+  --bs-primary: var(--accent);
+  --bs-primary-rgb: 9, 105, 218;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #15191e;
+    --panel: #1d2228;
+    --toolbar-bg: #242a31;
+    --text: #e6edf3;
+    --muted: #a7b0bb;
+    --line: #424a53;
+    --control-line: #76818c;
+    --accent: #78b5ff;
+    --accent-hover: #a8d0ff;
+    --on-accent: #101820;
+    --ok: #e6edf3;
+    --warn: #e6edf3;
+    --err: #ff7b72;
+    --ok-bg: #242a31;
+    --warn-bg: #242a31;
+    --err-bg: #3a1c19;
+    --muted-bg: #242a31;
+    --bar: #78b5ff;
+    --sidebar-bg: #20252b;
+    --sidebar-text: #e6edf3;
+    --sidebar-muted: #afb8c1;
+    --bs-link-hover-color: #a8d0ff;
+    --bs-primary-rgb: 120, 181, 255;
+  }
+}

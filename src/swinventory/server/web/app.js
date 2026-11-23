@@ -93,6 +93,10 @@
     const a = e.target.closest && e.target.closest("a[data-ret]");
     if (a) a.setAttribute("href", withReturn(a.dataset.ret));
   });
+  const skipLink = document.querySelector(".skip-link");
+  if (skipLink) skipLink.addEventListener("click", (event) => {
+    event.preventDefault(); $app.focus(); $app.scrollIntoView({ block: "start" });
+  });
 
   // 호스트를 가진 모든 목록이 같은 두 열을 쓴다. 자산이 없어도 수집된 구분(감지)이 보이고 자산번호만 '미등록'이다.
   // 자산번호 칸은 nowrap 이 아니다: 링크만 끊기지 않고 불일치 배지는 아래 줄로 내려갈 수 있어야 한다(cls: "asset" 은 칸의 최소 너비).
@@ -136,63 +140,10 @@
   const eventBadge = (type) => { const [t, k] = EVENT_LABELS[type] || [type, ""]; return badge(t, k); };
 
   // ---------- 표 ----------
-  // 정렬: 빈 값은 방향과 상관없이 맨 뒤, 숫자는 수치로, 문자열은 숫자 토큰을 수치로 보는 자연 정렬(5.15.0-91 < 5.15.0-100).
   const collator = new Intl.Collator("ko", { numeric: true, sensitivity: "base" });
-  const blank = (v) => v === null || v === undefined || v === "" || (typeof v === "number" && Number.isNaN(v));
-  const compareKeys = (a, b) => (typeof a === "number" && typeof b === "number" ? a - b : collator.compare(String(a), String(b)));
-  function sortRows(rows, column, dir) {
-    const keyed = rows.map((row, i) => ({ row, i, key: column.sort(row) }));
-    const present = keyed.filter((k) => !blank(k.key)).sort((x, y) => dir * compareKeys(x.key, y.key) || x.i - y.i); // 같은 키는 원래 순서(안정 정렬)
-    return [...present, ...keyed.filter((k) => blank(k.key))].map((k) => k.row);
-  }
-  // 표 머리글 조합 → 정렬 상태. 같은 화면에서 필터·검색으로 표를 다시 그려도 정렬을 유지한다(메뉴를 옮기면 비운다).
-  const sortMemory = new Map();
-
-  // columns: [{ title, render(row), sort?(row), mono?, nowrap?, cls?, desc?, srTitle? }]
-  //  - cls: 칸(td)에 붙는 CSS 클래스. 열 수가 많은 표에서 긴 칸이 글자 단위로 찌그러져 행이 4~5줄이 되지 않게 열별 최소 너비를 style.css 에서 준다(asset·os).
-  //  - sort 접근자가 있는 열만 정렬 버튼이 생긴다(desc: 첫 클릭을 내림차순으로).
-  //  - 행은 PAGE_ROWS 개까지만 그리고 'N개 더 보기'로 늘린다. 10행이 넘으면(.tall) 높이를 제한해 머리글을 컨테이너 안에서 고정한다.
-  function table(columns, rows, emptyMsg) {
-    if (!rows.length) return empty(emptyMsg || "데이터가 없습니다.");
-    const sig = columns.map((c) => c.title).join("|");
-    const mem = sortMemory.get(sig) || { col: -1, dir: 1 };
-    sortMemory.set(sig, mem);
-    let visible = PAGE_ROWS;
-    const box = h("div", { class: "scroll" + (rows.length > 10 ? " tall" : ""), tabindex: "0" });
-    const moreBtn = h("button", { type: "button", onclick: () => { visible += PAGE_ROWS; draw(); if (moreBtn.hidden) box.focus(); } });
-    const info = h("span", { class: "muted", role: "status" });
-    const more = h("div", { class: "more" }, moreBtn, info);
-    const toggle = (i) => {
-      const first = columns[i].desc ? -1 : 1; // 오름 → 내림 → 해제 (desc 열은 내림 → 오름 → 해제)
-      if (mem.col !== i) { mem.col = i; mem.dir = first; }
-      else if (mem.dir === first) mem.dir = -first;
-      else { mem.col = -1; mem.dir = 1; }
-      draw(i);
-    };
-    function draw(refocus) {
-      const ordered = mem.col < 0 ? rows : sortRows(rows, columns[mem.col], mem.dir);
-      const shown = ordered.slice(0, visible);
-      const head = h("tr", null, columns.map((c, i) => {
-        if (!c.sort) return h("th", { scope: "col" }, c.title || h("span", { class: "sr-only" }, c.srTitle || "표시"));
-        const on = mem.col === i;
-        return h("th", { scope: "col", "aria-sort": on ? (mem.dir === 1 ? "ascending" : "descending") : null },
-          h("button", { type: "button", class: "sort", "data-col": String(i), onclick: () => toggle(i) },
-            c.title, h("span", { class: "arrow", "aria-hidden": "true" }, on ? (mem.dir === 1 ? "▲" : "▼") : "↕")));
-      }));
-      const body = shown.map((r) => h("tr", null, columns.map((c) => h("td", { class: [c.mono ? "mono" : "", c.nowrap ? "nowrap" : "", c.cls || ""].filter(Boolean).join(" ") || null }, c.render(r)))));
-      const tbl = h("table", null, h("thead", null, head), h("tbody", null, body));
-      tbl.style.setProperty("--cols", String(columns.length)); // 좁은 화면의 최소 너비 계산용(CSSOM 대입은 CSP 에 걸리지 않는다)
-      clear(box).append(tbl);
-      const remaining = ordered.length - shown.length;
-      more.hidden = rows.length <= PAGE_ROWS;
-      moreBtn.hidden = remaining <= 0;
-      moreBtn.textContent = `${Math.min(PAGE_ROWS, remaining)}개 더 보기`;
-      info.textContent = `전체 ${ordered.length}개 중 ${shown.length}개 표시`;
-      if (refocus !== undefined) { const b = box.querySelector(`th button.sort[data-col="${refocus}"]`); if (b) b.focus(); }
-    }
-    draw();
-    return h("div", { class: "table-wrap" }, box, more);
-  }
+  const tableModule = window.SwinventoryUI?.createTable({ h, pageRows: PAGE_ROWS, empty });
+  if (!tableModule) throw new Error("공통 표 모듈을 불러오지 못했습니다.");
+  const table = tableModule.table;
 
   // 분포 막대: 거를 수 있는 항목은 진짜 button 이다(키보드 Tab·Enter·Space). active 를 주면 aria-pressed 로 현재 선택을 알린다.
   function bars(items, { onClick, nameOf = (i) => i.name, countOf = (i) => i.count, active, canClick = () => true, unit = "호스트" } = {}) {
@@ -288,6 +239,18 @@
     const s = q.toString();
     return s ? `${base}?${s}` : base;
   }
+  function hashOfExact(base, params, keepEmpty = []) {
+    const preserve = new Set(keepEmpty);
+    const q = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value === null || value === undefined || value === false) continue;
+      if (value === "" && !preserve.has(key)) continue;
+      q.set(key, String(value));
+    }
+    const search = q.toString();
+    return search ? `${base}?${search}` : base;
+  }
+  const replaceQueryExact = (base, params, keepEmpty = []) => history.replaceState(null, "", hashOfExact(base, params, keepEmpty));
   const setQuery = (base, params) => { location.hash = hashOf(base, params); };
   // 입력 중 주소만 갱신(hashchange 를 일으키지 않으므로 화면을 다시 그리지 않고 포커스·커서가 유지된다)
   const replaceQuery = (base, params) => history.replaceState(null, "", hashOf(base, params));
@@ -384,7 +347,7 @@
     if (!token) return renderLogin();
     const { segments, query } = parseHash();
     const name = VIEWS[segments[0]] ? segments[0] : "overview";
-    if (name !== currentName) { sortMemory.clear(); currentName = name; }
+    if (name !== currentName) { tableModule.clearSortMemory(); currentName = name; }
     $top.hidden = false;
     document.body.classList.add("signed-in");
     setMenu(false);
@@ -665,6 +628,8 @@
 
   async function softwareDetail(name, q) {
     const st = { version: q.get("version") || "", below: (q.get("below") || "").trim(), host: q.get("host") || "" };
+    const explicitReturn = returnHash(q);
+    const back = explicitReturn || `#/software${st.host ? `?host=${enc(st.host)}` : ""}`;
     const params = () => {
       const p = new URLSearchParams();
       if (st.version) p.set("version", st.version);
@@ -674,13 +639,15 @@
     };
     const [d, hosts] = await Promise.all([api(`/v1/software/${enc(name)}?${params()}`), api("/v1/hosts")]);
     const base = `#/software/${enc(name)}`;
-    const apply = (patch) => setQuery(base, { ...st, ...patch });
+    // 직접 소프트웨어 목록에서 연 경우에는 fallback 뒤로가기만 표시한다. return 쿼리는 링크로
+    // 들어와 원래 주소에 명시된 때에만 다음 필터 URL에도 보존한다.
+    const apply = (patch) => setQuery(base, { ...st, ...patch, ...(explicitReturn ? { return: explicitReturn } : {}) });
     const belowIn = h("input", { type: "text", id: "below-version", placeholder: "예: 3.0.11", value: st.below, size: 14 });
     const chips = [];
     if (st.version) chips.push(chip(`버전 = ${st.version}`, () => apply({ version: "" }), `버전 ${st.version}`));
     if (st.below) chips.push(chip(`${st.below} 미만`, () => apply({ below: "" }), `${st.below} 미만`));
     return titled(h("div", null,
-      h("div", { class: "toolbar" }, link("← 검색", `#/software${st.host ? `?host=${enc(st.host)}` : ""}`), serverFilter(hosts, st.host, (host) => apply({ host })), h("span", { class: "spacer" }), csvButton(() => `/v1/software/${enc(name)}?${withFormat(params())}`, `${name}-hosts.csv`)),
+      h("div", { class: "toolbar" }, link("← 이전 화면", back), serverFilter(hosts, st.host, (host) => apply({ host })), h("span", { class: "spacer" }), csvButton(() => `/v1/software/${enc(name)}?${withFormat(params())}`, `${name}-hosts.csv`)),
       h("h1", { class: "mono" }, d.name),
       h("h2", null, "버전 분포"),
       h("p", { class: "hint" }, "막대를 누르면 그 버전을 쓰는 호스트만 아래 목록에 보입니다. 다시 누르면 해제됩니다."),
@@ -1032,11 +999,27 @@
       catch (err) { hostError = err; }
     }
     const tabKey = q.get("tab") || "overview";
+    const softwareState = {
+      q: q.get("software_q") || "", category: q.get("software_category") || "",
+      approval: q.get("software_approval") || "", impact: q.get("software_impact") || "",
+    };
+    const cveState = { q: q.get("asset_cve_q") || "", impact: q.get("asset_cve_impact") || "", page: Math.max(1, Number(q.get("page") || 1)) };
+    let softwareSummary = null, softwareSummaryError = null;
+    if (tabKey === "software" && detail.host_id && !hostError) {
+      try { softwareSummary = await api(`/v1/hosts/${enc(detail.host_id)}/software-summary`); }
+      catch (err) { softwareSummaryError = err; }
+    }
     const back = returnHash(q) || "#/assets";
     const base = `#/assets/${enc(id)}`;
     const saved = q.get("saved") === "1";
-    if (saved) history.replaceState(null, "", `${location.pathname}${location.search}${hashOf(base, { return: back, tab: tabKey })}`);
-    const tabLink = (label, key) => tab(label, hashOf(base, { return: back, tab: key } ), tabKey === key);
+    if (saved) history.replaceState(null, "", `${location.pathname}${location.search}${hashOfExact(base, {
+      ...Object.fromEntries(q.entries()), return: back, tab: tabKey,
+    })}`);
+    const tabHref = (key) => hashOf(base, {
+      return: back, tab: key, software_q: softwareState.q, software_category: softwareState.category,
+      software_approval: softwareState.approval, software_impact: softwareState.impact,
+      asset_cve_q: cveState.q, asset_cve_impact: cveState.impact, page: cveState.page === 1 ? "" : cveState.page,
+    });
     const editLink = isAdmin() ? h("a", { class: "button-link", href: hashOf(`${base}/edit`, { return: back, success: location.hash }) }, "자산 정보 편집") : null;
     let content;
     if (tabKey === "overview") {
@@ -1063,33 +1046,112 @@
       content = h("div", { class: "error", role: "alert" }, `연결된 호스트 ${detail.hostname} 정보를 불러오지 못했습니다: ${hostError.message} `,
         h("button", { type: "button", onclick: () => setQuery(base, { return: back, tab: tabKey, retry: Date.now() }) }, "다시 시도"));
     } else if (tabKey === "software") {
-      const sourceRows = (hostDetail.source_freshness || []).filter((r) => r.source.startsWith("software."));
-      content = h("div", null, sourceRows.length ? h("section", { class: "panel" }, h("h2", null, "소프트웨어 수집 시점"),
-        table([
-          { title: "수집기", mono: true, render: (r) => r.source },
-          { title: "상태", render: (r) => badge(r.state === "ok" ? "성공" : "실패", r.state === "ok" ? "ok" : "err") },
-          { title: "마지막 성공", render: (r) => timeEl(r.last_success_at) },
-          { title: "마지막 시도 / 오류", render: (r) => [timeEl(r.last_attempt_at), r.last_error ? h("span", { class: "error-text" }, ` · ${r.last_error}`) : null] },
-        ], sourceRows)) : h("p", { class: "notice" }, "소프트웨어 수집기별 마지막 성공 시점은 아직 기록되지 않았습니다. 다음 정상 수집 이후 표시됩니다."),
-        h("h2", null, `설치 항목 ${hostDetail.packages.length}행`), table([
-        { title: "설치 소프트웨어", mono: true, sort: (p) => p.name, render: (p) => link(p.name, hashOf(`#/software/${enc(p.name)}`, { host: detail.host_id, version: p.version })) },
-        { title: "버전", mono: true, sort: (p) => p.version, render: (p) => p.version || "-" },
-        { title: "아키텍처", sort: (p) => p.arch, render: (p) => p.arch || "-" },
-        { title: "출처", sort: (p) => p.source, render: (p) => p.source },
-        { title: "취약점", render: (p) => link("확인된 영향", hashOf("#/cves", { host: detail.host_id, q: p.name })) },
-      ], hostDetail.packages, "마지막 성공 소프트웨어 수집에 설치 항목이 없습니다."));
+      const rows = softwareSummary?.items || [];
+      const categories = [["", "전체"], ["business_app", "업무용 앱"], ["os_package", "OS 패키지"],
+        ["development_dependency", "개발 라이브러리·의존성"], ["needs_review", "분류 확인 필요"]];
+      const categoryCount = (value) => value ? rows.filter((row) => row.category === value).length : rows.length;
+      const categoryTabs = h("nav", { class: "view-tabs", "aria-label": "설치 소프트웨어 분류" }, categories.map(([value, label]) => {
+        const anchor = h("a", { href: hashOf(base, { return: back, tab: "software", software_q: softwareState.q,
+          software_category: value, software_approval: softwareState.approval, software_impact: softwareState.impact }),
+          class: value === softwareState.category ? "active" : null, "aria-current": value === softwareState.category ? "page" : null,
+          "data-category": value }, `${label} ${categoryCount(value)}`);
+        anchor.addEventListener("click", (event) => {
+          event.preventDefault(); softwareState.category = value;
+          for (const tabAnchor of categoryTabs.querySelectorAll("a")) {
+            const active = tabAnchor.dataset.category === value;
+            tabAnchor.classList.toggle("active", active);
+            if (active) tabAnchor.setAttribute("aria-current", "page"); else tabAnchor.removeAttribute("aria-current");
+          }
+          persistSoftwareState(); drawSoftware();
+        });
+        return anchor;
+      }));
+      const approval = h("select", { "aria-label": "사용 승인 필터" }, [["", "모든 승인 상태"], ["active", "승인됨"], ["not_active", "미승인"], ["not_required", "대상 제외"], ["classification_required", "분류 확인 필요"]].map(([value, label]) => h("option", { value, selected: value === softwareState.approval }, label)));
+      const impact = h("select", { "aria-label": "취약점 영향 필터" }, [["", "모든 영향 판정"], ...Object.entries(IMPACT_STATUS).map(([value, [label]]) => [value, label])].map(([value, label]) => h("option", { value, selected: value === softwareState.impact }, label)));
+      const search = h("input", { type: "search", value: softwareState.q, placeholder: "이름·버전·출처 검색", "aria-label": "설치 소프트웨어 검색" });
+      const resultCount = h("span", { class: "table-toolbar-result", role: "status", "aria-live": "polite" }, `전체 ${rows.length}개`);
+      const tableHost = h("div");
+      const persistSoftwareState = () => replaceQuery(base, { return: back, tab: "software", software_q: softwareState.q.trim(),
+        software_category: softwareState.category, software_approval: softwareState.approval, software_impact: softwareState.impact,
+        asset_cve_q: cveState.q, asset_cve_impact: cveState.impact, page: "" });
+      const drawSoftware = () => {
+        const needle = softwareState.q.trim().toLocaleLowerCase("ko-KR");
+        const visibleRows = rows.filter((row) => {
+          const values = [row.name, row.product_name, row.publisher, row.source, row.arch, row.version, row.category];
+          return (!needle || values.some((value) => String(value || "").toLocaleLowerCase("ko-KR").includes(needle)))
+            && (!softwareState.category || row.category === softwareState.category)
+            && (!softwareState.approval || row.approval_status === softwareState.approval)
+            && (!softwareState.impact || row.impact_status === softwareState.impact);
+        });
+        resultCount.textContent = `${visibleRows.length}개 표시 · 전체 ${rows.length}개`;
+        clear(tableHost).append(workflowModule.softwareTable(visibleRows, {
+          hostId: detail.host_id, role,
+          detailHref: (row) => hashOf(`#/software/${enc(row.name)}`, { host: detail.host_id, version: row.version, return: location.hash }),
+        }));
+      };
+      search.addEventListener("input", () => {
+        softwareState.q = search.value; persistSoftwareState(); drawSoftware();
+      });
+      [approval, impact].forEach((element) => element.addEventListener("change", () => {
+        softwareState.approval = approval.value; softwareState.impact = impact.value;
+        persistSoftwareState(); drawSoftware();
+      }));
+      const reset = h("button", { type: "button", class: "link table-filter-reset", onclick: () => {
+        softwareState.q = ""; softwareState.category = ""; softwareState.approval = ""; softwareState.impact = "";
+        search.value = ""; approval.value = ""; impact.value = "";
+        for (const tabAnchor of categoryTabs.querySelectorAll("a")) {
+          const active = tabAnchor.dataset.category === ""; tabAnchor.classList.toggle("active", active);
+          if (active) tabAnchor.setAttribute("aria-current", "page"); else tabAnchor.removeAttribute("aria-current");
+        }
+        persistSoftwareState(); drawSoftware(); search.focus();
+      } }, "초기화");
+      const sourceRows = (hostDetail.source_freshness || []).filter((row) => row.source.startsWith("software."));
+      const freshness = sourceRows.length ? table([
+        { title: "수집기", render: (row) => row.source },
+        { title: "상태", render: (row) => badge(row.state === "ok" ? "성공" : "실패", row.state === "ok" ? "ok" : "err") },
+        { title: "마지막 성공", render: (row) => timeEl(row.last_success_at) },
+        { title: "마지막 시도 / 오류", render: (row) => [timeEl(row.last_attempt_at), row.last_error ? h("span", { class: "error-text" }, ` · ${row.last_error}`) : null] },
+      ], sourceRows) : h("p", { class: "muted" }, "소프트웨어 수집기별 성공 시각이 아직 없습니다. 다음 정상 수집 후 표시됩니다.");
+      drawSoftware();
+      content = softwareSummaryError ? h("div", { class: "error", role: "alert" }, `설치 소프트웨어 요약을 불러오지 못했습니다: ${errMsg(softwareSummaryError)}`)
+        : h("div", null,
+          categoryTabs, workflowModule.toolbar(search, approval, impact, resultCount, reset), tableHost,
+          h("p", { class: "table-note" }, "업무용 앱만 사용 승인 대상입니다. OS 패키지와 개발 의존성은 승인에서 제외되지만, 모든 설치 항목은 보안 조회에 포함됩니다."),
+          h("details", { class: "asset-collection-details" }, h("summary", null, "소프트웨어 수집기 상태"), freshness));
     } else if (tabKey === "cves") {
       try {
-        const page = Math.max(1, Number(q.get("page") || 1));
-        const result = await api(`/v1/vulnerabilities?host=${enc(detail.host_id)}&page=${page}&page_size=50`);
-        content = h("div", null, h("p", { class: "muted", role: "status" }, `이 호스트의 CVE 매핑 ${result.total}건`), table([
-          { title: "KEV", render: (r) => r.vendor ? badge("CISA KEV", "err") : "-" },
-          { title: "CVE", render: (r) => link(r.cve_id, hashOf(`#/cves/${enc(r.cve_id)}`, { return: location.hash })) },
-          { title: "제품", render: (r) => r.vendor ? `${r.vendor} · ${r.product}` : r.description },
-          { title: "영향 판정", render: (r) => impactBadge(r.impact_status) },
-          { title: "영향 호스트 / 설치", render: (r) => `${r.host_count || 0}대 · ${r.install_count || 0}개 설치` },
-        ], result.items, "이 호스트에 설치된 제품의 확인된 CVE 매핑이 없습니다. 미평가를 영향 없음으로 취급하지 않습니다."),
-        pageControls(base, { return: back, tab: tabKey, page }, page, 50, result.total));
+        let result = { items: [], total: 0 }, seq = 0;
+        const search = h("input", { type: "search", value: cveState.q, placeholder: "CVE ID·설명·제품 검색", "aria-label": "자산 CVE 검색" });
+        const impact = h("select", { "aria-label": "자산 CVE 영향 판정 필터" }, [["", "모든 영향 판정"], ...Object.entries(IMPACT_STATUS).map(([value, [label]]) => [value, label])].map(([value, label]) => h("option", { value, selected: value === cveState.impact }, label)));
+        const count = h("span", { class: "table-toolbar-result", role: "status", "aria-live": "polite" }, "CVE 자료를 불러오는 중…");
+        const tableHost = h("div");
+        const persistCveState = () => replaceQuery(base, { return: back, tab: "cves", software_q: softwareState.q,
+          software_category: softwareState.category, software_approval: softwareState.approval, software_impact: softwareState.impact,
+          asset_cve_q: cveState.q.trim(), asset_cve_impact: cveState.impact, page: cveState.page === 1 ? "" : cveState.page });
+        const refreshCves = async () => {
+          const run = ++seq; const params = new URLSearchParams({ host: detail.host_id, page: String(cveState.page), page_size: "50" });
+          if (cveState.q.trim()) params.set("q", cveState.q.trim()); if (cveState.impact) params.set("impact", cveState.impact);
+          count.textContent = "CVE 자료를 불러오는 중…";
+          try {
+            result = await api(`/v1/vulnerabilities?${params}`); if (!alive() || run !== seq) return;
+            count.textContent = `전체 ${result.total}건`;
+            const detailHref = (row, impactStatus) => hashOf(`#/cves/${enc(row.cve_id)}`, {
+              return: location.hash, host: detail.host_id, impact: impactStatus || "",
+            });
+            clear(tableHost).append(workflowModule.vulnerabilityTable(result.items, { detailHref, serverPage: true }),
+              pageControls(base, { return: back, tab: "cves", software_q: softwareState.q, software_category: softwareState.category,
+                software_approval: softwareState.approval, software_impact: softwareState.impact,
+                asset_cve_q: cveState.q, asset_cve_impact: cveState.impact }, cveState.page, 50, result.total));
+          } catch (err) { if (alive() && run === seq) { count.textContent = "조회 실패"; clear(tableHost).append(h("div", { class: "error", role: "alert" }, `취약점 조회 실패: ${errMsg(err)}`)); } }
+        };
+        let timer; search.addEventListener("input", () => { cveState.q = search.value; cveState.page = 1; persistCveState(); clearTimeout(timer); timer = setTimeout(refreshCves, 220); });
+        impact.addEventListener("change", () => { cveState.impact = impact.value; cveState.page = 1; persistCveState(); refreshCves(); });
+        const reset = h("button", { type: "button", class: "link table-filter-reset", onclick: () => {
+          cveState.q = ""; cveState.impact = ""; cveState.page = 1; search.value = ""; impact.value = ""; persistCveState(); refreshCves(); search.focus();
+        } }, "초기화");
+        await refreshCves();
+        content = h("div", null, workflowModule.toolbar(search, impact, count, reset), tableHost,
+          h("p", { class: "table-note" }, "판정별 호스트 수는 설치 제품 매핑 기준입니다. 여러 제품이 설치된 호스트는 상태 간 중복될 수 있으며, 확인되지 않은 매칭은 영향 없음 판정이 아닙니다."));
       } catch (err) { content = h("div", { class: "error", role: "alert" }, `취약점 조회 실패: ${err.message}`); }
     } else if (tabKey === "network") {
       content = h("div", null, h("p", null, link("호스트 상세에서 모든 네트워크 정보 보기 →", `#/hosts/${enc(detail.host_id)}`)),
@@ -1113,11 +1175,30 @@
         pageControls(base, { return: back, tab: tabKey, page }, page, 100, result.total));
       } catch (err) { content = h("div", { class: "error", role: "alert" }, `이력 조회 실패: ${err.message}`); }
     } else content = empty("알 수 없는 자산 상세 탭입니다.");
+    const asset = detail.asset;
+    const osName = hostDetail?.host?.os_name ? `${hostDetail.host.os_name}${hostDetail.host.os_version ? ` ${hostDetail.host.os_version}` : ""}` : "OS 미기록";
+    const context = h("div", { class: "asset-context-strip", "aria-label": "자산 요약 정보" },
+      h("span", null, h("b", null, "호스트"), detail.hostname || asset.hostname || "호스트 미연결"),
+      h("span", null, h("b", null, "관리 IP"), asset.ip || "미기록"),
+      h("span", null, h("b", null, "OS"), osName),
+      h("span", null, h("b", null, "담당자"), `정 ${assetOwnerValue(asset.primary_owner) || "미지정"} · 부 ${assetOwnerValue(asset.secondary_owner) || "미지정"}`),
+      h("span", null, h("b", null, "연결"), ASSET_STATUS[detail.status]?.[0] || detail.status),
+      h("span", null, h("b", null, "마지막 수집"), hostDetail ? compactKstTime(hostDetail.host.last_seen) : h("span", { class: "muted" }, "미수집")));
+    const tabs = workflowModule.tabs([
+      { label: "기본 정보", active: tabKey === "overview", href: tabHref("overview") },
+      { label: "설치 소프트웨어", active: tabKey === "software", href: tabHref("software") },
+      { label: "취약점", active: tabKey === "cves", href: tabHref("cves") },
+      { label: "네트워크", active: tabKey === "network", href: tabHref("network") },
+      { label: "변경 이력", active: tabKey === "history", href: tabHref("history") },
+    ], "자산 상세 보기");
+    const tabKeys = ["overview", "software", "cves", "network", "history"];
+    tabs.querySelectorAll("a").forEach((anchor, index) => anchor.addEventListener("click", (event) => {
+      event.preventDefault(); location.hash = tabHref(tabKeys[index]);
+    }));
+    const pageActions = h("div", { class: "page-actions" }, link("← 이전 화면", back), editLink);
     return titled(h("div", null, saved ? h("p", { class: "notice", role: "status" }, "자산 정보를 저장했습니다.") : null,
-      pageHeader(`자산 ${detail.asset.asset_no}`, editLink, `자산 상세 · revision ${detail.asset.revision}`),
-      h("nav", { class: "toolbar asset-tabs", "aria-label": "자산 상세 보기" },
-        tabLink("기본 정보", "overview"), tabLink("설치 소프트웨어", "software"), tabLink("취약점", "cves"), tabLink("네트워크", "network"), tabLink("변경 이력", "history")),
-      h("section", { class: "panel" }, content)), `자산 ${detail.asset.asset_no}`);
+      pageHeader(`자산 ${asset.asset_no}`, pageActions, `${asset.hostname || detail.hostname || "호스트 미연결"} · ${kindLabel(asset.kind)}`),
+      context, tabs, h("section", { class: "panel" }, content)), `자산 ${asset.asset_no}`);
   }
 
   async function assetForm(idOrNull, q) {
@@ -2108,10 +2189,34 @@
   const productLabel = (v) => PRODUCT_CATEGORIES[v] || v || "분류 확인 필요";
   const requestBadge = (v) => { const [label, kind] = REQUEST_STATUS[v] || [v, ""]; return badge(label, kind); };
   const impactBadge = (v) => { const [label, kind] = IMPACT_STATUS[v] || [v, ""]; return badge(label, kind); };
-  const pageControls = (base, query, page, pageSize, total) => h("div", { class: "pagination", role: "group", "aria-label": "페이지 이동" },
+  const workflowRequestLabel = (value) => REQUEST_STATUS[value]?.[0] || (value ? String(value) : "요청 없음");
+  const workflowImpactLabel = (value) => IMPACT_STATUS[value]?.[0] || (value ? String(value) : "판정 정보 없음");
+  const compactKstTime = (iso) => {
+    if (!iso) return h("span", { class: "muted" }, "미지정");
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return h("time", { datetime: iso, title: String(iso) }, String(iso));
+    const parts = new Map(new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+    }).formatToParts(date).map((part) => [part.type, part.value]));
+    const full = `${parts.get("year")}-${parts.get("month")}-${parts.get("day")} ${parts.get("hour")}:${parts.get("minute")} KST`;
+    return h("time", { datetime: iso, title: full }, `${parts.get("month")}-${parts.get("day")} ${parts.get("hour")}:${parts.get("minute")}`);
+  };
+  const workflowModule = window.SwinventoryUI?.createWorkflow({
+    h, table, link, compactTime: compactKstTime,
+    requestLabel: workflowRequestLabel, impactLabel: workflowImpactLabel,
+  });
+  if (!workflowModule) throw new Error("업무 흐름 표 모듈을 불러오지 못했습니다.");
+  const pageControls = (base, query, page, pageSize, total, keepEmpty = []) => h("div", { class: "pagination", role: "group", "aria-label": "페이지 이동" },
     h("span", { class: "muted", role: "status" }, `전체 ${total}건 · ${Math.min(total, (page - 1) * pageSize + 1)}–${Math.min(total, page * pageSize)}건 · ${page}페이지`),
-    h("button", { type: "button", disabled: page <= 1, onclick: () => setQuery(base, { ...query, page: page - 1 }) }, "이전"),
-    h("button", { type: "button", disabled: page * pageSize >= total, onclick: () => setQuery(base, { ...query, page: page + 1 }) }, "다음"));
+    h("button", { type: "button", disabled: page <= 1, onclick: () => {
+      const retained = keepEmpty.filter((key) => Object.prototype.hasOwnProperty.call(query, key) && query[key] === "");
+      location.hash = hashOfExact(base, { ...query, page: page - 1 }, retained);
+    } }, "이전"),
+    h("button", { type: "button", disabled: page * pageSize >= total, onclick: () => {
+      const retained = keepEmpty.filter((key) => Object.prototype.hasOwnProperty.call(query, key) && query[key] === "");
+      location.hash = hashOfExact(base, { ...query, page: page + 1 }, retained);
+    } }, "다음"));
   const categorySelect = (value, onChange) => h("select", { "aria-label": "업무용 앱 분류", value, onchange: (e) => onChange(e.target.value) },
     [["", "모든 분류"], ...Object.entries(PRODUCT_CATEGORIES)].map(([v, t]) => h("option", { value: v, selected: v === value }, t)));
 
@@ -2239,44 +2344,103 @@
     if (role !== "admin" && role !== "request") return h("div", null, pageHeader("SW 사용 승인"), h("div", { class: "panel" }, "조회 전용 계정에는 승인 요청 권한이 없습니다."));
     if (role === "request" && authKind !== "session") return h("div", null, pageHeader("SW 사용 승인"), h("div", { class: "panel" }, "요청자는 개인 세션으로 로그인해야 요청·상세·상태 변경을 할 수 있습니다."));
     if (rest[0]) return softwareRequestDetail(Number(rest[0]), q, alive);
-    const st = { q: q.get("q") || "", status: q.get("status") || "", mine: q.get("mine") === "true",
-      unassigned: q.get("unassigned") === "true", overdue: q.get("overdue") === "true", page: Math.max(1, Number(q.get("page") || 1)) };
-    const base = "#/sw-requests"; let result = { items: [], total: 0 }; const body = h("div");
+    const defaultScope = role === "admin" ? (q.get("overdue") === "true" ? "overdue" : q.has("mine") ? "all" : "pending") : "mine";
+    const st = {
+      q: q.get("q") || "", status: q.get("status") || "", security: q.get("security") || "", scope: q.get("scope") || defaultScope,
+      mine: q.get("mine") === "true", unassigned: q.get("unassigned") === "true",
+      sort: q.get("sort") || "", direction: q.get("direction") || "asc", page: Math.max(1, Number(q.get("page") || 1)),
+    };
+    if (st.scope === "pending" && st.status) st.scope = "all";
+    if (st.scope === "assigned" && (st.mine || st.unassigned)) { st.mine = false; st.unassigned = false; }
+    const base = "#/sw-requests"; let result = { items: [], total: 0 }; let seq = 0; const body = h("div");
     const search = h("input", { type: "search", "aria-label": "승인 요청 검색", placeholder: "요청 번호·제품·요청자", value: st.q });
-    const status = h("select", { "aria-label": "요청 상태 필터" }, [["", "모든 상태"], ...Object.entries(REQUEST_STATUS)].map(([v, [label]]) => h("option", { value: v, selected: v === st.status }, label)));
-    const mine = h("input", { type: "checkbox", checked: st.mine, "aria-label": "내 요청" });
+    const statusOptions = [["", "모든 상태"], ...Object.entries(REQUEST_STATUS).map(([value, [label]]) => [value, label])];
+    const status = h("select", { "aria-label": "요청 상태 필터" }, statusOptions.map(([v, label]) => h("option", { value: v, selected: v === st.status }, label)));
+    const securityOptions = [["", "모든 보안 판정"], ...Object.entries(IMPACT_STATUS).map(([value, [label]]) => [value, label])];
+    const security = h("select", { "aria-label": "보안 영향 판정 필터" }, securityOptions.map(([v, label]) => h("option", { value: v, selected: v === st.security }, label)));
+    const mine = h("input", { type: "checkbox", checked: st.mine, "aria-label": "내가 제출한 요청만" });
     const unassigned = h("input", { type: "checkbox", checked: st.unassigned, "aria-label": "미배정" });
-    const overdue = h("input", { type: "checkbox", checked: st.overdue, "aria-label": "처리 기한 초과" });
-    if (!isAdminSession()) mine.disabled = true;
+    const queryState = () => ({
+      q: st.q.trim(), status: st.status, security: st.security, scope: st.scope,
+      mine: st.mine ? "true" : "", unassigned: st.unassigned ? "true" : "",
+      sort: st.sort, direction: st.direction, page: st.page === 1 ? "" : st.page,
+    });
+    let scopes = null;
+    const syncScopeNav = () => {
+      if (!scopes) return;
+      for (const anchor of scopes.querySelectorAll("a")) {
+        const scope = anchor.dataset.scope;
+        const active = scope === st.scope;
+        anchor.classList.toggle("active", active);
+        if (active) anchor.setAttribute("aria-current", "page"); else anchor.removeAttribute("aria-current");
+        anchor.href = hashOf(base, { ...queryState(), scope, status: "",
+          mine: scope === "assigned" ? "" : queryState().mine,
+          unassigned: scope === "assigned" ? "" : queryState().unassigned, page: "" });
+      }
+    };
+    const sortState = () => ({ key: st.sort || "due", direction: st.sort ? st.direction : "asc" });
+    const resultCount = h("span", { class: "table-toolbar-result", role: "status", "aria-live": "polite" }, `전체 ${result.total}건`);
     const refresh = async () => {
+      const run = ++seq;
       const params = new URLSearchParams({ page: String(st.page), page_size: "50" });
       if (st.q.trim()) params.set("q", st.q.trim()); if (st.status) params.set("status", st.status);
-      if (st.mine && isAdminSession()) params.set("mine", "true"); if (st.unassigned && role === "admin") params.set("unassigned", "true");
-      if (st.overdue && role === "admin") params.set("overdue", "true");
+      if (st.security) params.set("security_impact", st.security);
+      if (st.mine && role === "admin" && st.scope !== "assigned") params.set("mine", "true");
+      if (st.unassigned && role === "admin" && st.scope !== "assigned") params.set("unassigned", "true");
+      if (st.scope === "pending" && role === "admin") params.set("pending", "true");
+      if (st.scope === "assigned" && isAdminSession()) params.set("assigned_to_me", "true");
+      if (st.scope === "overdue" && role === "admin") params.set("overdue", "true");
+      if (st.sort) { params.set("sort", st.sort); params.set("direction", st.direction); }
       clear(body).append(h("p", { class: "muted", role: "status" }, "요청을 불러오는 중…"));
       try {
-        result = await api(`/v1/software-requests?${params}`); if (!alive()) return;
-        clear(body).append(table([
-          { title: "요청 번호", sort: (r) => r.id, render: (r) => link(r.request_no, withReturn(`#/sw-requests/${r.id}`)) },
-          { title: "제품·버전", render: (r) => h("span", null, link(r.product_name, `#/software/${enc(r.name)}`), ` · ${r.version}`) },
-          { title: "요청자", sort: (r) => r.requester_name, render: (r) => r.requester_name },
-          { title: "대상 호스트", sort: (r) => r.host_count, render: (r) => `${r.host_count}대` },
-          { title: "상태", render: (r) => requestBadge(r.status) },
-          { title: "담당자 / 기한", render: (r) => h("span", null, r.assignee_name || "미배정", h("br"), timeEl(r.due_at)) },
-          { title: "갱신", sort: (r) => r.updated_at, render: (r) => timeEl(r.updated_at) },
-        ], result.items, "요청이 없습니다."), pageControls(base, st, st.page, 50, result.total));
-      } catch (err) { if (alive()) clear(body).append(h("div", { class: "error", role: "alert" }, errMsg(err))); }
+        result = await api(`/v1/software-requests?${params}`); if (!alive() || run !== seq) return;
+        resultCount.textContent = `전체 ${result.total}건`;
+        const requestUrl = (row) => withReturn(`#/sw-requests/${row.id}`);
+        clear(body).append(workflowModule.approvalTable(result.items, {
+          openRequest: requestUrl, serverSort: sortState(),
+          onServerSort: (key, direction) => {
+            st.sort = key; st.direction = direction; st.page = 1;
+            replaceQuery(base, queryState()); refresh();
+          },
+        }), pageControls(base, st, st.page, 50, result.total));
+      } catch (err) { if (alive() && run === seq) clear(body).append(h("div", { class: "error", role: "alert" }, errMsg(err))); }
     };
-    const apply = () => { st.q = search.value; st.status = status.value; st.mine = isAdminSession() && mine.checked; st.unassigned = role === "admin" && unassigned.checked; st.overdue = role === "admin" && overdue.checked; st.page = 1;
-      replaceQuery(base, { ...st, q: st.q.trim() }); refresh(); };
+    const apply = () => {
+      st.q = search.value; st.status = status.value; st.security = security.value;
+      if (st.scope === "pending" && st.status) st.scope = "all";
+      st.mine = isAdminSession() && st.scope !== "assigned" && mine.checked;
+      st.unassigned = role === "admin" && st.scope !== "assigned" && unassigned.checked; st.page = 1;
+      mine.checked = st.mine; unassigned.checked = st.unassigned;
+      syncScopeNav();
+      replaceQuery(base, queryState()); refresh();
+    };
     let timer; search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(apply, 250); });
-    [status, mine, unassigned, overdue].forEach((el) => el.addEventListener("change", apply));
+    [status, security, mine, unassigned].forEach((el) => el.addEventListener("change", apply));
     await refresh();
-    return h("div", null, pageHeader("SW 사용 승인 요청", h("a", { href: "#/business-apps", class: "button-link" }, "업무용 앱 찾기"),
-      "접수·배정·보완·재제출·결정과 승인 범위를 이력으로 관리합니다."),
-      h("div", { class: "toolbar" }, search, status, isAdminSession() ? h("label", { class: "check-filter" }, mine, "내 요청") : null,
-        role === "admin" ? h("label", { class: "check-filter" }, unassigned, "미배정") : null,
-        role === "admin" ? h("label", { class: "check-filter" }, overdue, "기한 초과") : null), body);
+    const scopeItems = role === "admin" ? [
+      { key: "pending", label: "검토 대기" }, { key: "all", label: "전체" },
+      ...(isAdminSession() ? [{ key: "assigned", label: "내 검토" }] : []), { key: "overdue", label: "기한 초과" },
+    ] : [];
+    if (scopeItems.length) {
+      scopes = workflowModule.tabs(scopeItems.map((item) => ({
+        label: item.label, active: item.key === st.scope,
+        href: hashOf(base, { ...queryState(), scope: item.key, status: "", mine: "", unassigned: "", page: "" }),
+      })), "승인 요청 범위");
+      scopes.querySelectorAll("a").forEach((anchor, index) => { anchor.dataset.scope = scopeItems[index].key; });
+    }
+    const filters = workflowModule.toolbar(search, status, security,
+      isAdminSession() && st.scope !== "assigned" ? h("label", { class: "table-toolbar-check" }, mine, "내가 제출한 요청") : null,
+      role === "admin" && st.scope !== "assigned" ? h("label", { class: "table-toolbar-check" }, unassigned, "미배정") : null,
+      resultCount,
+      h("button", { type: "button", class: "link table-filter-reset", onclick: () => {
+        st.q = ""; st.status = ""; st.security = ""; st.mine = false; st.unassigned = false; st.page = 1;
+        search.value = ""; status.value = ""; security.value = ""; mine.checked = false; unassigned.checked = false;
+        syncScopeNav();
+        replaceQuery(base, queryState()); refresh(); search.focus();
+      } }, "초기화"));
+    return h("div", { class: "workflow-page" },
+      pageHeader("SW 사용 승인 요청", h("a", { href: "#/business-apps", class: "button-link" }, "업무용 앱 찾기")),
+      scopes, filters, body);
   }
 
   async function softwareRequestDetail(requestId, q, alive) {
@@ -2374,36 +2538,78 @@
   // ---------- CVE / KEV ----------
   async function viewVulnerabilities(rest, q, alive) {
     if (rest[0]) return vulnerabilityDetail(rest[0], q, alive);
-    const st = { q: q.get("q") || "", kev: q.get("kev") === "true", impact: q.get("impact") || "", host: q.get("host") || "", page: Math.max(1, Number(q.get("page") || 1)) };
+    const exactProductKeys = ["product_source", "product_name", "product_arch", "product_version"];
+    const st = {
+      q: q.get("q") || "", kev: q.get("kev") === "true", impact: q.get("impact") || "", host: q.get("host") || "",
+      product_source: q.has("product_source") ? q.get("product_source") : null,
+      product_name: q.has("product_name") ? q.get("product_name") : null,
+      product_arch: q.has("product_arch") ? q.get("product_arch") : null,
+      product_version: q.has("product_version") ? q.get("product_version") : null,
+      page: Math.max(1, Number(q.get("page") || 1)),
+    };
     const base = "#/cves", body = h("div"), feedBox = h("div"), msg = feedback(); let seq = 0;
     const search = h("input", { type: "search", "aria-label": "CVE 검색", placeholder: "CVE ID·설명·KEV 제품", value: st.q });
     const kev = h("input", { type: "checkbox", checked: st.kev, "aria-label": "CISA KEV만 보기" });
-    const impact = h("select", { "aria-label": "CVE 영향 판정" }, [["", "모든 영향 상태"], ...Object.entries(IMPACT_STATUS)].map(([v, [label]]) => h("option", { value: v, selected: v === st.impact }, label)));
+    const impactOptions = [["", "모든 영향 상태"], ...Object.entries(IMPACT_STATUS).map(([value, [label]]) => [value, label])];
+    const impact = h("select", { "aria-label": "CVE 영향 판정" }, impactOptions.map(([v, label]) => h("option", { value: v, selected: v === st.impact }, label)));
+    const productScope = h("div"); const hostScope = h("div");
+    let hostScopeLabel = st.host;
+    const resultCount = h("span", { class: "table-toolbar-result", role: "status" }, "CVE 목록");
+    const drawScopes = () => {
+      clear(productScope); clear(hostScope);
+      if (st.product_name !== null) productScope.append(h("span", { class: "table-filter-context" },
+        `제품: ${st.product_name} ${st.product_version || ""} · ${st.product_source || ""} · ${st.product_arch || ""}`,
+        h("button", { type: "button", class: "link", onclick: () => {
+          st.product_source = null; st.product_name = null; st.product_arch = null; st.product_version = null; st.page = 1;
+          replaceQueryExact(base, queryState(), exactProductKeys); drawScopes(); refresh();
+        }, "aria-label": "제품 영향 범위 해제" }, "해제")));
+      if (st.host) hostScope.append(h("span", { class: "table-filter-context", title: `호스트 ID: ${st.host}` }, `호스트: ${hostScopeLabel}`,
+        h("button", { type: "button", class: "link", onclick: () => {
+          st.host = ""; st.page = 1; replaceQueryExact(base, queryState(), exactProductKeys); drawScopes(); refresh();
+        }, "aria-label": "호스트 필터 해제" }, "해제")));
+    };
+    const loadHostScope = async () => {
+      if (!st.host) return;
+      const selectedHost = st.host;
+      try {
+        const detail = await api(`/v1/hosts/${enc(selectedHost)}`);
+        if (!alive() || st.host !== selectedHost) return;
+        const hostname = detail.host?.hostname;
+        const assetNo = detail.asset?.asset_no;
+        hostScopeLabel = [hostname || selectedHost, assetNo ? `자산 ${assetNo}` : ""].filter(Boolean).join(" · ");
+      } catch (_) { /* 읽기 메타데이터가 없으면 호스트 ID를 그대로 보여 준다 */ }
+    };
+    const queryState = () => ({
+      q: st.q.trim(), kev: st.kev ? "true" : "", impact: st.impact, host: st.host,
+      product_source: st.product_source, product_name: st.product_name, product_arch: st.product_arch, product_version: st.product_version,
+      page: st.page === 1 ? "" : st.page,
+    });
     const refresh = async () => {
       const run = ++seq; const params = new URLSearchParams({ page: String(st.page), page_size: "50" });
       if (st.q.trim()) params.set("q", st.q.trim()); if (st.kev) params.set("kev", "true"); if (st.impact) params.set("impact", st.impact); if (st.host) params.set("host", st.host);
+      for (const key of exactProductKeys) if (st[key] !== null) params.set(key, st[key]);
       clear(body).append(h("p", { class: "muted", role: "status" }, "CVE 자료를 불러오는 중…"));
       try {
-        const [result, feeds] = await Promise.all([api(`/v1/vulnerabilities?${params}`), api("/v1/vulnerability-feeds")]);
+        const result = await api(`/v1/vulnerabilities?${params}`);
         if (!alive() || run !== seq) return;
-        const items = result.items; clear(feedBox).append(h("div", { class: "feed-grid" }, feeds.length ? feeds.map((f) => h("div", { class: "feed-status" },
+        resultCount.textContent = `전체 ${result.total}건`;
+        const items = result.items; const feeds = result.feeds || []; clear(feedBox).append(h("details", { class: "feed-details" }, h("summary", null, "KEV·NVD 피드 상태"),
+          h("div", { class: "feed-grid" }, feeds.length ? feeds.map((f) => h("div", { class: "feed-status" },
           h("strong", null, f.source === "cisa_kev" ? "CISA KEV" : "NVD"), badge(f.state, f.state === "ok" ? "ok" : f.state === "failed" ? "err" : "warn"),
           h("span", null, `항목 ${f.records} · 데이터 버전 ${f.data_version || "-"}`),
           h("span", null, "마지막 성공 ", timeEl(f.last_success_at), " · 시도 ", timeEl(f.last_attempt_at)),
-          f.last_error ? h("span", { class: "error-text" }, f.last_error) : null)) : empty("피드 동기화를 실행하지 않았습니다.")));
-        clear(body).append(table([
-          { title: "KEV", render: (r) => r.vendor ? badge("CISA KEV", "err") : "-" },
-          { title: "CVE / 제품", sort: (r) => r.cve_id, render: (r) => h("span", null,
-            link(r.cve_id, `#/cves/${enc(r.cve_id)}`), h("span", { class: "muted" }, ` · ${r.vendor || "NVD"} ${r.product || ""}`)) },
-          { title: "CVSS", sort: (r) => Number(r.cvss_score), render: (r) => r.cvss_score == null ? "-" : h("span", null, r.cvss_score, r.cvss_severity ? ` · ${r.cvss_severity}` : "") },
-          { title: "영향 판정", render: (r) => impactBadge(r.impact_status) },
-          { title: "영향 호스트 / 설치", sort: (r) => r.host_count, render: (r) => `${r.host_count || 0}대 · ${r.install_count || 0}설치` },
-          { title: "KEV 추가 / 기한", sort: (r) => r.date_added, render: (r) => r.vendor ? `${r.date_added || "-"} · ${r.due_date || "기한 없음"}` : "-" },
-          { title: "NVD 갱신", sort: (r) => r.modified_at, render: (r) => timeEl(r.modified_at) },
-        ], items, "CVE가 없습니다."), pageControls(base, st, st.page, 50, result.total));
+          f.last_error ? h("span", { class: "error-text" }, f.last_error) : null)) : empty("피드 동기화를 실행하지 않았습니다."))));
+        const detailHref = (row, impactStatus) => hashOfExact(`#/cves/${enc(row.cve_id)}`, {
+          return: location.hash, impact: impactStatus || "", host: st.host,
+          product_source: st.product_source, product_name: st.product_name,
+          product_arch: st.product_arch, product_version: st.product_version,
+        }, exactProductKeys);
+        clear(body).append(workflowModule.vulnerabilityTable(items, { detailHref, serverPage: true }),
+          pageControls(base, st, st.page, 50, result.total, exactProductKeys),
+          h("p", { class: "table-note" }, "판정별 수는 설치 제품 매핑 기준입니다. 여러 제품이 설치된 호스트는 서로 다른 상태에 중복 집계될 수 있습니다. 확인 필요·확정 일치 없음은 영향 없음 판정이 아닙니다."));
       } catch (err) { if (alive() && run === seq) clear(body).append(h("div", { class: "error", role: "alert" }, err.message)); }
     };
-    const apply = () => { st.q = search.value; st.kev = kev.checked; st.impact = impact.value; st.page = 1; replaceQuery(base, { ...st, q: st.q.trim() }); refresh(); };
+    const apply = () => { st.q = search.value; st.kev = kev.checked; st.impact = impact.value; st.page = 1; replaceQueryExact(base, queryState(), exactProductKeys); refresh(); };
     let timer; search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(apply, 250); }); [kev, impact].forEach((el) => el.addEventListener("change", apply));
     const syncButton = isAdminSession() ? h("button", { type: "button", class: "primary", onclick: async (e) => {
       const button = e.currentTarget; button.disabled = true; button.textContent = "피드 갱신 중…";
@@ -2412,16 +2618,38 @@
         msg.ok(failed ? "일부 피드 갱신이 실패했습니다. 마지막 성공 자료는 유지했습니다." : "CISA KEV 및 NVD 피드 갱신을 처리했습니다."); await refresh();
       } catch (err) { msg.ok(errMsg(err)); } finally { button.disabled = false; button.textContent = "KEV·NVD 갱신"; }
     } }, "KEV·NVD 갱신") : null;
+    const hostScopeTask = loadHostScope();
     await refresh();
-    return h("div", null, pageHeader("취약점 영향 조회", syncButton, "CISA KEV를 우선 표시합니다. 영향 확정은 정확한 제품·아키텍처·설치 버전과 관리자 근거가 있어야 합니다."),
-      feedBox, st.host ? h("div", { class: "toolbar" }, chip(`호스트: ${st.host}`, () => setQuery(base, { ...st, host: "", page: 1 }), "호스트")) : null,
-      h("div", { class: "toolbar" }, search, h("label", { class: "check-filter" }, kev, "CISA KEV만"), impact), body, msg.node);
+    await hostScopeTask;
+    drawScopes();
+    const toolbar = workflowModule.toolbar(search, impact, h("label", { class: "table-toolbar-check" }, kev, "CISA KEV만"), resultCount);
+    return h("div", { class: "workflow-page" }, pageHeader("취약점 영향 조회", syncButton),
+      hostScope, productScope, toolbar, body, feedBox, msg.node);
   }
 
   async function vulnerabilityDetail(cveId, q, alive) {
     const item = await api(`/v1/vulnerabilities/${enc(cveId)}`); const root = h("div");
     const kev = item.kev;
     const matches = item.matches || [];
+    const selectedImpact = q.get("impact") || "";
+    const observedInstallations = matches.flatMap((match) => {
+      const statusFallback = ({ affected_confirmed: "confirmed", needs_review: "needs_review", not_affected: "not_affected" })[match.status];
+      const sourceRows = Array.isArray(match.observed_installations) ? match.observed_installations : (match.installations || []);
+      return sourceRows.map((row) => ({
+        ...row, name: row.name || match.name, source: row.source || match.source, arch: row.arch || match.arch,
+        evidence: row.evidence || match.evidence || "", impact_status: row.impact_status || statusFallback || "needs_review",
+      }));
+    });
+    const installationScope = (row) => {
+      if (selectedImpact && row.impact_status !== selectedImpact) return false;
+      if (q.has("host") && row.host_id !== q.get("host")) return false;
+      const productFields = { product_source: "source", product_name: "name", product_arch: "arch", product_version: "version" };
+      for (const [queryKey, rowKey] of Object.entries(productFields)) {
+        if (q.has(queryKey) && String(row[rowKey] ?? "") !== q.get(queryKey)) return false;
+      }
+      return true;
+    };
+    const scopedInstallations = observedInstallations.filter(installationScope);
     const admin = isAdminSession();
     const notice = feedback();
     const referenceList = (item.references || []).map((r) => h("li", null, h("a", { href: r.url, target: "_blank", rel: "noopener noreferrer" }, r.url), r.source ? ` · ${r.source}` : ""));
@@ -2444,15 +2672,28 @@
             h("p", null, match.evidence), match.conditions ? h("p", { class: "muted" }, `적용 조건: ${match.conditions}`) : null,
             match.affected_versions?.length ? h("p", null, `영향 확정 버전: ${match.affected_versions.join(", ")}`) : null,
             h("p", { class: "muted" }, `근거 갱신 ${match.updated_by} · `, timeEl(match.updated_at), ` · revision ${match.revision}`),
-            table([
-              { title: "호스트", render: (r) => link(r.hostname, `#/hosts/${enc(r.host_id)}`) },
-              { title: "자산", render: (r) => r.asset_no ? assetLink(`#/assets/${r.asset_id}`, r.asset_no) : "미등록" },
-              { title: "설치 버전", render: (r) => r.version },
-              { title: "제품", render: (r) => link(`${r.name} · ${r.source}`, `#/software/${enc(r.name)}`) },
-            ], match.installations || [], "현재 설치 데이터에 일치하는 행이 없습니다."),
             admin ? h("button", { type: "button", onclick: (e) => editMatch(match, e.currentTarget) }, "판정 근거 편집") : null))
             : empty("제품 영향 판정이 없습니다. 미평가를 영향 없음으로 간주하지 않습니다."),
           admin ? h("button", { type: "button", class: "primary", onclick: (e) => editMatch(null, e.currentTarget) }, "제품 영향 판정 추가") : null)),
+      h("section", { class: "panel" },
+        h("h2", null, `설치 호스트 영향 판정 (${scopedInstallations.length})`),
+        q.has("host") || q.has("product_name") ? h("p", { class: "muted" }, [
+          q.has("host") ? `호스트 ${q.get("host")}` : "",
+          q.has("product_name") ? `제품 ${q.get("product_name")} ${q.get("product_version") || "(버전 미기록)"}` : "",
+          selectedImpact ? workflowImpactLabel(selectedImpact) : "",
+        ].filter(Boolean).join(" · ")) : null,
+        table([
+          { title: "호스트", render: (r) => link(r.hostname || r.host_id, `#/hosts/${enc(r.host_id)}`) },
+          { title: "자산", render: (r) => r.asset_no ? assetLink(`#/assets/${r.asset_id}`, r.asset_no) : "미등록" },
+          { title: "영향 판정", render: (r) => impactBadge(r.impact_status) },
+          { title: "소프트웨어 · 설치 버전", render: (r) => `${r.product_name || r.name || "제품명 미기록"} · ${r.version || "버전 미기록"}` },
+          { title: "담당자(정/부)", render: (r) => assetOwnerCell(r) },
+          { title: "마지막 수집", render: (r) => timeEl(r.last_seen) },
+          { title: "근거", render: (r) => r.evidence
+            ? h("details", { class: "evidence-disclosure" }, h("summary", null, "근거 보기"), h("p", null, r.evidence))
+            : h("span", { class: "muted" }, "근거 미기록") },
+        ], scopedInstallations, selectedImpact ? "선택한 판정의 설치행이 없습니다." : "이 CVE와 연결된 관측 설치행이 없습니다."),
+        h("p", { class: "table-note" }, "버전이 정확히 일치하지 않는 설치는 영향 없음으로 간주하지 않고 ‘확정 일치 없음’으로 구분합니다.")),
       h("section", { class: "panel" }, h("h2", null, "피드 상태"), item.feed_status?.length ? table([
         { title: "출처", render: (r) => r.source }, { title: "상태", render: (r) => badge(r.state, r.state === "ok" ? "ok" : r.state === "failed" ? "err" : "warn") },
         { title: "마지막 성공", render: (r) => timeEl(r.last_success_at) }, { title: "마지막 시도", render: (r) => timeEl(r.last_attempt_at) },
