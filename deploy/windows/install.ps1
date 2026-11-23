@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   swinventory Windows 에이전트 설치(관리자 PowerShell). 에이전트 자체는 저권한 계정(LOCAL SERVICE)의 예약 작업으로 실행된다.
@@ -48,6 +48,17 @@ function Get-VerifiedAgent {
         Fail "에이전트 해시 불일치 — 설치하지 않는다 (기대 $($Sha256.ToLowerInvariant()), 실제 $actual). 서버의 파일이 바뀌었으면 화면에서 명령을 다시 만든다." 1
     }
     return $tmp
+}
+
+# print JSON 은 설치 스크립트에서 사용하지 않는다. stdout 은 버리고 종료 코드만 확인해
+# PowerShell 의 별도 JSON 파서나 native 출력 디코딩에 의존하지 않는다.
+# C# CLI 는 collector 오류를 stderr 에 이미 경고로 출력한다.
+function Invoke-PrintValidation([string]$Executable, [string]$ConfigPath) {
+    $stdoutSink = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'NUL' } else { '/dev/null' }
+    $arguments = 'print --config "{0}"' -f $ConfigPath
+    $process = Start-Process -FilePath $Executable -ArgumentList $arguments -NoNewWindow -Wait -PassThru `
+        -RedirectStandardOutput $stdoutSink
+    return $process.ExitCode
 }
 
 if ($DownloadOnly) {   # 관리자·Windows 가 아니어도 다운로드와 해시 검증만(사전 배치·진단용)
@@ -163,10 +174,9 @@ if (-not $NoTask) {
 
 # --- 첫 수집 검증 ------------------------------------------------------------
 Info '수집 검증(print)'
-$json = & $Exe print --config $ConfigPath
-if ($LASTEXITCODE -ne 0) { Fail "수집이 실패했다(종료 코드 $LASTEXITCODE). 위 메시지를 확인한다. 설치 파일은 배치됐다." 1 }
-$snapshot = $json | ConvertFrom-Json
-foreach ($name in $snapshot.errors.PSObject.Properties.Name) { Write-Warning "수집기 실패: $name : $($snapshot.errors.$name)" }
+try { $printExitCode = Invoke-PrintValidation -Executable $Exe -ConfigPath $ConfigPath }
+catch { Fail "수집 검증을 시작하지 못했다($($_.Exception.GetType().Name)). 설치 파일은 배치됐다." 1 }
+if ($printExitCode -ne 0) { Fail "수집이 실패했다(종료 코드 $printExitCode). 위 메시지를 확인한다. 설치 파일은 배치됐다." 1 }
 
 if (-not $NoTask) {
     Info '예약 작업을 지금 실행해 서버 전송 확인(저권한 계정으로)'
