@@ -281,6 +281,7 @@ def test_ui_source_never_uses_innerhtml(client):
     html = client.get("/").text
     scripts = re.findall(r"<script\b[^>]*\bsrc=[\"']([^\"']+)[\"']", html, flags=re.I)
     assert scripts
+    assert any(src.endswith("/ui-batches.js") for src in scripts)
     for src in scripts:
         assert src.startswith("/") and not src.startswith("//"), src
         response = client.get(src)

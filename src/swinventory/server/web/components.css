@@ -226,6 +226,110 @@ td.asset-owners { width: 12em; min-width: 12em; max-width: 12em; }
 .software-table .software-approval { width: 12%; }
 .software-table .software-request-state { width: 12%; }
 .software-table .software-impact { width: 11%; }
+/* 선택 열이 추가된 호스트 표는 기존 7열에서 폭을 나눠 쓴다. */
+.software-table:has(.software-select-column) .software-select-column { width: 4%; }
+.software-table:has(.software-select-column) .software-name { width: 21%; }
+.software-table:has(.software-select-column) .software-version { width: 11%; }
+.software-table:has(.software-select-column) .software-source { width: 17%; }
+.software-table:has(.software-select-column) .software-category { width: 13%; }
+.software-table:has(.software-select-column) .software-approval { width: 11%; }
+.software-table:has(.software-select-column) .software-request-state { width: 12%; }
+.software-table:has(.software-select-column) .software-impact { width: 11%; }
+.software-select-column { text-align: center; }
+.batch-selection-label { display: inline-flex; min-width: 28px; min-height: 30px; align-items: center; justify-content: center; cursor: pointer; }
+.batch-selection-checkbox { width: 17px; height: 17px; margin: 0; cursor: pointer; }
+.batch-selection-checkbox:disabled { cursor: not-allowed; }
+.software-grid:has(.batch-selection-checkbox) .data-grid tbody tr:has(.batch-selection-checkbox:checked) td { background: color-mix(in srgb, var(--toolbar-bg) 72%, var(--panel)); }
+.software-grid:has(.batch-selection-checkbox) .data-grid tbody tr:has(.batch-selection-checkbox:checked) td:first-child { background: var(--toolbar-bg); }
+.software-grid:has(.software-select-column) .data-grid th:first-child,
+.software-grid:has(.software-select-column) .data-grid td:first-child { z-index: 2; }
+.software-grid:has(.software-select-column) .data-grid thead th:first-child { z-index: 4; }
+.batch-selection-toolbar { display: flex; min-width: 0; min-height: 46px; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 7px 14px; margin: 8px 0 10px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--toolbar-bg); }
+.batch-selection-count { min-width: 0; color: var(--text); font-size: 13px; font-variant-numeric: tabular-nums; }
+.batch-selection-actions { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 6px; }
+.batch-selection-actions button { min-height: 34px; padding-inline: 9px; }
+.batch-selection-actions [data-batch-open-request] { margin-left: 3px; }
+.batch-selection-limit { flex: 1 1 100%; color: var(--err); font-size: 13px; }
+.batch-selection-note, .batch-selection-scope { flex: 1 1 100%; margin: 0; color: var(--muted); font-size: 13px; }
+.batch-selection-scope { color: var(--text); }
+.batch-request-dialog { width: min(620px, calc(100vw - 28px)); }
+.batch-request-host { grid-column: 1 / -1; overflow-wrap: anywhere; }
+.batch-request-summary { display: grid; gap: 6px; margin: 0 0 12px; padding: 8px 12px; border-block: 1px solid var(--line); background: var(--toolbar-bg); list-style: none; }
+.batch-request-dialog .form { max-width: none; }
+.batch-request-dialog .field-error, .batch-request-dialog [role=alert] { color: var(--err); }
+.batch-queue-grid, .batch-item-grid { min-width: 0; }
+.batch-queue-grid .data-grid, .batch-item-grid .data-grid { table-layout: fixed; }
+.batch-queue-table { min-width: 1080px; }
+.batch-queue-table .batch-queue-host { width: 19%; }
+.batch-queue-table .batch-queue-items { width: 6%; }
+.batch-queue-table .batch-queue-status { width: 17%; }
+.batch-queue-table .batch-queue-security { width: 17%; }
+.batch-queue-table .batch-queue-requester { width: 10%; }
+.batch-queue-table .batch-queue-reviewer { width: 10%; }
+.batch-queue-table .batch-queue-due { width: 10%; }
+.batch-queue-table .batch-queue-number { width: 11%; white-space: nowrap; }
+.batch-queue-link { color: var(--text); text-decoration: underline; text-decoration-color: var(--muted); text-underline-offset: 3px; }
+.batch-queue-link:hover, .batch-child-link:hover { color: var(--accent); text-decoration-color: currentColor; }
+.batch-queue-sub, .batch-item-sub { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
+.batch-number { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.batch-item-table { min-width: 1060px; }
+.batch-item-table th, .batch-item-table td { padding-inline: 7px; }
+.batch-item-table .batch-item-product { width: 17%; }
+.batch-item-table .batch-item-version { width: 8%; }
+.batch-item-table .batch-item-installed { width: 8%; }
+.batch-item-table .batch-item-status { width: 10%; }
+.batch-item-table .batch-item-approval { width: 9%; }
+.batch-item-table .batch-item-impact { width: 9%; }
+.batch-item-table .batch-item-cves { width: 11%; }
+.batch-item-table .batch-item-assignment { width: 10%; }
+.batch-item-table .batch-item-actions { width: 18%; }
+.batch-item-table:has(.batch-item-select) .batch-item-select { width: 4%; text-align: center; }
+.batch-item-table:has(.batch-item-select) .batch-item-product { width: 15%; }
+.batch-item-table:has(.batch-item-select) .batch-item-version { width: 7%; }
+.batch-item-table:has(.batch-item-select) .batch-item-installed { width: 7%; }
+.batch-item-table:has(.batch-item-select) .batch-item-status { width: 9%; }
+.batch-item-table:has(.batch-item-select) .batch-item-approval { width: 8%; }
+.batch-item-table:has(.batch-item-select) .batch-item-impact { width: 8%; }
+.batch-item-table:has(.batch-item-select) .batch-item-cves { width: 12%; }
+.batch-item-table:has(.batch-item-select) .batch-item-assignment { width: 9%; }
+.batch-item-table:has(.batch-item-select) .batch-item-actions { width: 21%; }
+.batch-item-selection { width: 17px; height: 17px; margin: 0; }
+.batch-item-select { text-align: center; }
+.batch-status, .batch-impact { color: var(--text); font-size: 13px; font-weight: 400; overflow-wrap: anywhere; }
+.batch-impact.is-confirmed { color: var(--err); font-weight: 600; }
+.batch-installation-missing { color: var(--err); font-weight: 600; }
+.batch-cve-list { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.batch-cve-item { display: inline-flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 4px; overflow-wrap: anywhere; white-space: normal; }
+.batch-item-cves a { overflow-wrap: anywhere; }
+.batch-kev { color: var(--err); font-size: 12px; font-weight: 600; }
+.batch-item-action-list { display: flex; min-width: 0; flex-wrap: wrap; gap: 4px; }
+.batch-item-action { min-height: 30px; padding: 3px 7px; font-size: 13px; white-space: nowrap; }
+.batch-detail-grid { min-width: 0; }
+.batch-detail-context { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 18px; margin: 4px 0 10px; padding: 8px 10px; border-block: 1px solid var(--line); background: var(--toolbar-bg); }
+.batch-detail-context > div { display: flex; min-width: 0; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.batch-detail-context strong { font-weight: 500; }
+.batch-detail-meta { color: var(--muted); font-size: 13px; }
+.batch-detail-status { text-align: right; }
+.batch-detail-reasons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 20px; margin: 10px 0; }
+.batch-detail-reasons section { min-width: 0; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.batch-detail-reasons h2 { margin: 0 0 5px; color: var(--muted); font-size: 13px; font-weight: 500; }
+.batch-detail-reasons p, .batch-item-current-request p, .batch-item-decision p,
+.batch-action-targets { white-space: pre-wrap; overflow-wrap: anywhere; }
+.batch-detail-reasons p { margin: 0; }
+.batch-security-summary { margin: 7px 0; color: var(--muted); font-size: 13px; }
+.batch-detail-selection-tools, .batch-bulk-toolbar { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 7px; margin: 8px 0; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--toolbar-bg); }
+.batch-detail-selection-tools .batch-selection-count, .batch-bulk-toolbar .batch-selection-count { margin-right: auto; }
+.batch-detail-selection-tools button, .batch-bulk-toolbar button { min-height: 34px; }
+.batch-detail-selection-tools button:disabled, .batch-bulk-toolbar button:disabled { cursor: not-allowed; opacity: .6; }
+.batch-item-current-request, .batch-item-decision { margin-top: 5px; font-size: 12px; }
+.batch-item-current-request > summary, .batch-item-decision > summary { margin: 4px 0; }
+.batch-item-current-request p, .batch-item-decision p { margin: 4px 0; font-size: 13px; }
+.batch-action-form { max-width: none; }
+.batch-action-form textarea { width: 100%; min-height: 88px; }
+.batch-action-targets { grid-column: 1 / -1; margin: 0; padding: 8px 10px; border-block: 1px solid var(--line); background: var(--toolbar-bg); }
+.batch-action-dialog { width: min(620px, calc(100vw - 28px)); }
+.batch-history-details { margin-top: 8px; border-top: 1px solid var(--line); }
+.batch-history-details > summary { padding: 5px 0; }
 .vulnerability-table { min-width: 920px; }
 .vulnerability-table .vulnerability-id { width: 18%; }
 .vulnerability-table .vulnerability-severity { width: 11%; }
@@ -255,6 +359,19 @@ td.asset-owners { width: 12em; min-width: 12em; max-width: 12em; }
 .workflow-impact-link:hover { color: var(--accent); text-decoration-color: currentColor; }
 .workflow-page { min-width: 0; }
 .approval-grid, .software-grid, .vulnerability-grid { min-width: 0; }
+@media (max-width: 760px) {
+  .batch-selection-toolbar { align-items: flex-start; }
+  .batch-selection-count { flex: 1 1 100%; }
+  .batch-selection-actions { width: 100%; }
+  .batch-selection-actions button { flex: 1 1 auto; }
+  .batch-request-dialog { max-height: calc(100dvh - 24px); padding: 16px; overflow: auto; }
+  .batch-detail-reasons { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .batch-detail-status { text-align: left; }
+  .batch-detail-selection-tools, .batch-bulk-toolbar { align-items: flex-start; }
+  .batch-detail-selection-tools .batch-selection-count, .batch-bulk-toolbar .batch-selection-count { flex: 1 1 100%; }
+  .batch-detail-selection-tools button, .batch-bulk-toolbar button { flex: 1 1 auto; }
+  .batch-action-dialog { max-height: calc(100dvh - 24px); padding: 16px; overflow: auto; }
+}
 
 @media (max-width: 760px) {
   .grid2, .enroll-grid, .request-grid, .feed-grid { grid-template-columns: minmax(0, 1fr); }

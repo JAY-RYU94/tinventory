@@ -86,6 +86,7 @@
         while (box.firstChild) box.removeChild(box.firstChild);
         box.append(tableElement);
         const remaining = ordered.length - shown.length;
+        if (typeof options.onVisibleRows === "function") options.onVisibleRows(shown);
         more.hidden = rows.length <= pageRows && !(options.serverPage && (localSorted || serverSorted));
         moreBtn.hidden = remaining <= 0;
         moreBtn.textContent = `${Math.min(pageRows, remaining)}개 더 보기`;

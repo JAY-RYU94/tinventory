@@ -56,9 +56,9 @@
       });
     }
 
-    function softwareTable(rows, { hostId, role, detailHref, serverPage = false } = {}) {
-      const statusAccess = role === "admin";
-      return table([
+    function softwareTable(rows, { hostId, role, detailHref, serverPage = false, selection = null, onVisibleRows } = {}) {
+      const statusAccess = role === "admin" || role === "request";
+      const columns = [
         {
           title: "소프트웨어", cls: "software-name", sort: (row) => row.product_name || row.name,
           render: (row) => detailHref
@@ -78,7 +78,12 @@
         {
           title: "요청 상태", cls: "software-request-state", sort: (row) => row.request_status,
           render: (row) => {
-            if (row.request_status) return requestState(row.request_status);
+            if (row.request_status) {
+              const href = row.batch_id
+                ? `#/sw-requests/batches/${encodeURIComponent(row.batch_id)}`
+                : row.request_id ? `#/sw-requests/${encodeURIComponent(row.request_id)}` : null;
+              return href ? link(requestLabel(row.request_status), href, "workflow-state-link") : requestState(row.request_status);
+            }
             if (!statusAccess) return plain("—", "workflow-state", "요청 이력은 권한 범위에 따라 표시됩니다.");
             return plain("요청 없음", "workflow-state");
           },
@@ -100,10 +105,30 @@
             return result;
           },
         },
-      ], rows, "설치된 소프트웨어가 없습니다.", {
+      ];
+      if (selection?.enabled) {
+        columns.unshift({
+          title: "선택", cls: "software-select-column",
+          render: (row) => {
+            const key = selection.keyOf(row);
+            const eligible = selection.canSelect(row);
+            const checkbox = h("input", {
+              type: "checkbox", class: "batch-selection-checkbox", "data-software-key": key,
+              "aria-label": `${row.product_name || row.name} ${row.version || "버전 미기록"} 선택`,
+              checked: selection.selectedKeys.has(key), disabled: !eligible,
+              onchange: (event) => selection.onToggle(row, event.currentTarget.checked),
+            });
+            if (!eligible) checkbox.title = selection.disabledReason(row) || "이 설치 항목은 승인 요청 대상이 아닙니다.";
+            return h("label", { class: "batch-selection-label" }, checkbox,
+              h("span", { class: "sr-only" }, `${row.product_name || row.name} ${row.version || "버전 미기록"} 선택`));
+          },
+        });
+      }
+      return table(columns, rows, "설치된 소프트웨어가 없습니다.", {
         wrapClass: "software-grid", tableClass: "software-table",
         ariaLabel: "설치 소프트웨어 및 승인·취약점 상태", caption: "설치 소프트웨어",
         serverPage, sortScope: hostId ? `software-host-${hostId}` : "software-products",
+        onVisibleRows,
       });
     }
 

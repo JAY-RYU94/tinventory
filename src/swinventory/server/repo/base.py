@@ -235,6 +235,10 @@ class InventoryRepository(ABC):
     def create_software_request(self, values: dict[str, Any], host_ids: list[str], actor_id: str, at: str) -> int: ...
 
     @abstractmethod
+    def create_software_request_batch(self, batch: dict[str, Any], items: list[dict[str, Any]],
+                                      actor_id: str, at: str) -> int: ...
+
+    @abstractmethod
     def list_software_requests(self, *, requester_id: str | None, status: str | None, q: str,
                                unassigned: bool, overdue_before: str | None, offset: int, limit: int,
                                assignee_id: str | None = None, pending: bool = False,
@@ -243,6 +247,21 @@ class InventoryRepository(ABC):
 
     @abstractmethod
     def get_software_request(self, request_id: int) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def list_software_request_batches(self, *, requester_id: str | None, scope: str,
+                                      status: str | None, host_id: str | None,
+                                      security_impact: str | None, q: str,
+                                      overdue_before: str | None, assignee_id: str | None,
+                                      sort: str | None, direction: str,
+                                      offset: int, limit: int) -> tuple[int, list[dict[str, Any]]]: ...
+
+    @abstractmethod
+    def get_software_request_batch(self, batch_id: int, at: str) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def update_software_request_batch(self, batch_id: int, actions: list[dict[str, Any]],
+                                      actor_id: str, at: str) -> None: ...
 
     @abstractmethod
     def update_software_request(self, request_id: int, expected_revision: int, values: dict[str, Any],

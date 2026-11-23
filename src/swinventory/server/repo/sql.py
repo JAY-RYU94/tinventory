@@ -788,13 +788,16 @@ class SqlInventoryRepository(InventoryRepository):
             latest_id = (select(request.c.id).select_from(request_scope).where(and_(*request_predicates))
                          .order_by(request.c.created_at.desc(), request.c.id.desc()).limit(1)
                          .correlate(p).scalar_subquery().label("request_id"))
-            values.extend([latest_status, latest_id])
+            batch_item = S.software_request_batch_items
+            latest_batch_id = (select(batch_item.c.batch_id).where(batch_item.c.request_id == latest_id)
+                              .limit(1).correlate(p).scalar_subquery().label("batch_id"))
+            values.extend([latest_status, latest_id, latest_batch_id])
         stmt = select(*values).select_from(from_clause).where(p.c.host_id == host_id)
         with self._conn() as conn:
             rows = [dict(row) for row in conn.execute(stmt).mappings()]
         for row in rows:
             if "request_id" in row:
-                row["request_no"] = f"SW-{row.pop('request_id'):06d}" if row["request_id"] is not None else None
+                row["request_no"] = f"SW-{row['request_id']:06d}" if row["request_id"] is not None else None
         rows.sort(key=lambda row: (row["name"].casefold(), row["source"], row["arch"], row["version"]))
         return rows
 
@@ -887,12 +890,12 @@ class SqlInventoryRepository(InventoryRepository):
                 t.c.source == values["source"], t.c.name == values["name"], t.c.arch == values["arch"],
                 t.c.version == values["version"], t.c.status.in_(statuses), targets.c.host_id.in_(host_ids))).limit(1)).first()
             if duplicate:
-                raise ConflictError(f"overlapping request:{duplicate[0]}")
+                raise ConflictError("overlapping request")
             approved = c.execute(select(a.c.id, a.c.request_id).where(and_(a.c.source == values["source"],
                 a.c.name == values["name"], a.c.arch == values["arch"], a.c.version == values["version"],
                 a.c.host_id.in_(host_ids), a.c.state == "active", a.c.valid_until >= at)).limit(1)).first()
             if approved:
-                raise ConflictError(f"already approved:{approved[1]}")
+                raise ConflictError("already approved")
             for host_id in host_ids:
                 present = c.execute(select(p.c.host_id).where(and_(p.c.source == values["source"], p.c.name == values["name"],
                     p.c.arch == values["arch"], p.c.version == values["version"], p.c.host_id == host_id)).limit(1)).first()
@@ -906,11 +909,362 @@ class SqlInventoryRepository(InventoryRepository):
                 revision=1, occurred_at=at))
             return request_id
 
+    @staticmethod
+    def _request_impact_expr(request):
+        """요청의 정확한 제품·버전 키에 대한 CVE 영향 판정 SQL 식."""
+        m, v = S.vulnerability_product_matches, S.vulnerability_match_versions
+        mapped = select(m.c.cve_id).where(and_(m.c.source == request.c.source,
+            m.c.name == request.c.name, m.c.arch == request.c.arch)).correlate(request)
+        confirmed_from = m.join(v, and_(v.c.cve_id == m.c.cve_id, v.c.source == m.c.source,
+            v.c.name == m.c.name, v.c.arch == m.c.arch))
+        confirmed = exists(select(m.c.cve_id).select_from(confirmed_from).where(and_(
+            m.c.source == request.c.source, m.c.name == request.c.name, m.c.arch == request.c.arch,
+            m.c.status == "affected_confirmed", v.c.version == request.c.version)).correlate(request))
+        review = exists(select(m.c.cve_id).where(and_(m.c.source == request.c.source,
+            m.c.name == request.c.name, m.c.arch == request.c.arch, m.c.status == "needs_review")).correlate(request))
+        all_not_affected = exists(select(m.c.cve_id).where(and_(m.c.source == request.c.source,
+            m.c.name == request.c.name, m.c.arch == request.c.arch, m.c.status != "not_affected")).correlate(request))
+        return case((confirmed, "confirmed"), (review, "needs_review"),
+                    (~exists(mapped), "not_assessed"), (~all_not_affected, "not_affected"),
+                    else_="no_observed_match")
+
+    def create_software_request_batch(self, batch: dict[str, Any], items: list[dict[str, Any]],
+                                      actor_id: str, at: str) -> int:
+        """호스트 단위 child 요청들을 모두 검증한 뒤 하나의 트랜잭션으로 생성한다."""
+        if not items or len(items) > 100:
+            raise ValueError("요청 항목 수를 확인하세요.")
+        keys = [(item["source"], item["name"], item["arch"], item["version"]) for item in items]
+        if len(set(keys)) != len(keys):
+            raise ValueError("중복 소프트웨어 항목이 있습니다.")
+        t, targets, events = S.software_requests, S.software_request_hosts, S.software_request_events
+        batches, batch_items = S.software_request_batches, S.software_request_batch_items
+        classification, p, approval = S.software_classifications, S.installed_packages, S.software_approvals
+        host_id = batch["host_id"]
+        with self.transaction(), self._conn(write=True) as c:
+            if c.execute(select(S.hosts.c.host_id).where(S.hosts.c.host_id == host_id)).first() is None:
+                raise ValueError("등록된 호스트가 아닙니다.")
+            # Check every selected product before inserting the batch, so a rejected selection
+            # cannot leave a parent or an earlier child behind.
+            for item in items:
+                classified = c.execute(select(classification.c.category).where(and_(
+                    classification.c.source == item["source"], classification.c.name == item["name"],
+                    classification.c.arch == item["arch"]))).scalar_one_or_none()
+                if classified != "business_app":
+                    raise ValueError("업무용 앱으로 분류된 설치 소프트웨어만 선택할 수 있습니다.")
+                present = c.execute(select(p.c.host_id).where(and_(p.c.host_id == host_id,
+                    p.c.source == item["source"], p.c.name == item["name"], p.c.arch == item["arch"],
+                    p.c.version == item["version"])).limit(1)).first()
+                if not present:
+                    raise ValueError("선택한 호스트에 지정 버전이 설치되어 있어야 합니다.")
+                overlap = c.execute(select(t.c.id).select_from(t.join(targets,
+                    targets.c.request_id == t.c.id)).where(and_(targets.c.host_id == host_id,
+                        t.c.source == item["source"], t.c.name == item["name"], t.c.arch == item["arch"],
+                        t.c.version == item["version"], t.c.status.in_(("submitted", "reviewing", "needs_changes"))))
+                    .limit(1)).first()
+                if overlap:
+                    raise ConflictError("overlapping request")
+                active = c.execute(select(approval.c.id).where(and_(approval.c.host_id == host_id,
+                    approval.c.source == item["source"], approval.c.name == item["name"],
+                    approval.c.arch == item["arch"], approval.c.version == item["version"],
+                    approval.c.state == "active", approval.c.valid_from <= at, approval.c.valid_until >= at,
+                    approval.c.ended_at.is_(None))).limit(1)).first()
+                if active:
+                    raise ConflictError("already approved")
+            result = c.execute(insert(batches).values(requester_id=actor_id, host_id=host_id,
+                purpose=batch["purpose"], license_evidence=batch["license_evidence"], created_at=at))
+            batch_id = int(result.inserted_primary_key[0])
+            for order, item in enumerate(items):
+                product = c.execute(select(classification.c.product_name).where(and_(
+                    classification.c.source == item["source"], classification.c.name == item["name"],
+                    classification.c.arch == item["arch"]))).scalar_one()
+                values = {"requester_id": actor_id, **item,
+                    "product_name": product or item["name"], "purpose": batch["purpose"],
+                    "license_evidence": batch["license_evidence"], "assignee_id": None,
+                    "due_at": None, "approval_until": None, "decision_reason": ""}
+                inserted = c.execute(insert(t).values(**values, status="submitted", revision=1,
+                    created_at=at, updated_at=at))
+                request_id = int(inserted.inserted_primary_key[0])
+                c.execute(insert(targets).values(request_id=request_id, host_id=host_id))
+                c.execute(insert(events).values(request_id=request_id, actor_id=actor_id, action="submit",
+                    from_status=None, to_status="submitted", reason="",
+                    detail=json.dumps({"host_ids": [host_id], "batch_id": batch_id}, sort_keys=True),
+                    revision=1, occurred_at=at))
+                c.execute(insert(batch_items).values(batch_id=batch_id, request_id=request_id, item_order=order))
+            return batch_id
+
+    def _batch_impact_columns(self, request):
+        return self._request_impact_expr(request).label("security_impact")
+
+    def list_software_request_batches(self, *, requester_id: str | None, scope: str,
+                                      status: str | None, host_id: str | None,
+                                      security_impact: str | None, q: str,
+                                      overdue_before: str | None, assignee_id: str | None,
+                                      sort: str | None, direction: str,
+                                      offset: int, limit: int) -> tuple[int, list[dict[str, Any]]]:
+        b, bi, r = S.software_request_batches, S.software_request_batch_items, S.software_requests.alias("batch_request")
+        requester, host = S.users.alias("batch_requester"), S.hosts.alias("batch_host")
+        impact = self._batch_impact_columns(r)
+        child = bi.join(r, r.c.id == bi.c.request_id)
+        child_for_batch = lambda cond: exists(select(bi.c.request_id).select_from(child).where(
+            and_(bi.c.batch_id == b.c.id, cond)).correlate(b))
+        stmt = (select(b.c.id, b.c.host_id, host.c.hostname, host.c.last_seen,
+                       b.c.requester_id, requester.c.username.label("requester_name"),
+                       b.c.created_at, b.c.purpose, b.c.license_evidence)
+                .select_from(b.join(requester, requester.c.id == b.c.requester_id)
+                    .outerjoin(host, host.c.host_id == b.c.host_id)))
+        if requester_id:
+            stmt = stmt.where(b.c.requester_id == requester_id)
+        if host_id:
+            stmt = stmt.where(b.c.host_id == host_id)
+        child_filters = []
+        if status:
+            child_filters.append(r.c.status == status)
+        if security_impact:
+            child_filters.append(impact == security_impact)
+        if scope == "pending":
+            child_filters.append(r.c.status.in_(("submitted", "reviewing")))
+        elif scope == "assigned":
+            child_filters.append(r.c.assignee_id == assignee_id if assignee_id else r.c.assignee_id.is_not(None))
+        elif scope == "overdue" and overdue_before:
+            child_filters.extend((r.c.due_at.is_not(None), r.c.due_at < overdue_before,
+                r.c.status.in_(("submitted", "reviewing", "needs_changes"))))
+        if child_filters:
+            stmt = stmt.where(child_for_batch(and_(*child_filters)))
+        needle = q.strip().casefold()
+        if needle:
+            batch_number = re.fullmatch(r"swb-([0-9]{1,20})", needle)
+            if batch_number:
+                number = int(batch_number.group(1))
+                stmt = stmt.where(b.c.id == number if number <= 2_147_483_647 else b.c.id == -1)
+            else:
+                pattern = f"%{_escape_like(needle)}%"
+                stmt = stmt.where(or_(func.lower(host.c.hostname).like(pattern, escape="\\"),
+                    func.lower(requester.c.username).like(pattern, escape="\\"),
+                    child_for_batch(and_(*(child_filters + [or_(func.lower(r.c.name).like(pattern, escape="\\"),
+                        func.lower(r.c.product_name).like(pattern, escape="\\"))])))))
+
+        # Correlated status/security counts provide sortable aggregate columns before LIMIT/OFFSET.
+        status_values = ("submitted", "reviewing", "needs_changes", "approved", "rejected", "withdrawn")
+        status_counts = {state: (select(func.count()).select_from(child).where(and_(
+            bi.c.batch_id == b.c.id, r.c.status == state)).correlate(b).scalar_subquery()) for state in status_values}
+        impact_states = ("confirmed", "needs_review", "not_affected", "no_observed_match", "not_assessed")
+        impact_counts = {state: (select(func.count()).select_from(child).where(and_(
+            bi.c.batch_id == b.c.id, impact == state)).correlate(b).scalar_subquery()) for state in impact_states}
+        item_count = (select(func.count()).select_from(bi).where(bi.c.batch_id == b.c.id)
+                      .correlate(b).scalar_subquery())
+        pending_count = status_counts["submitted"] + status_counts["reviewing"]
+        open_count = pending_count + status_counts["needs_changes"]
+        terminal_count = status_counts["approved"] + status_counts["rejected"] + status_counts["withdrawn"]
+        due_at = (select(func.min(r.c.due_at)).select_from(child).where(and_(bi.c.batch_id == b.c.id,
+            r.c.due_at.is_not(None), r.c.status.in_(("submitted", "reviewing", "needs_changes"))))
+            .correlate(b).scalar_subquery())
+        batch_status = case(*( (status_counts[state] == item_count, state) for state in status_values), else_="mixed")
+        impact_status_expr = case(*( (impact_counts[state] == item_count, state) for state in impact_states), else_="mixed")
+        stmt = stmt.add_columns(item_count.label("item_count"), pending_count.label("pending_count"),
+            open_count.label("open_count"), terminal_count.label("terminal_count"), due_at.label("due_at"),
+            batch_status.label("status"), impact_status_expr.label("security_impact"),
+            *[status_counts[state].label(f"status_{state}") for state in status_values],
+            *[impact_counts[state].label(f"impact_{state}") for state in impact_states])
+        count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
+        pending_order = case((pending_count > 0, 0), else_=1)
+        if sort is None:
+            ordering = [pending_order.asc(), due_at.asc().nulls_last(), b.c.created_at.desc(), b.c.id.desc()]
+        else:
+            keys = {"host": func.lower(host.c.hostname), "requester": func.lower(requester.c.username),
+                    "status": batch_status, "due": due_at, "batch_no": b.c.id}
+            key = keys[sort]
+            ordered = key.asc() if direction == "asc" else key.desc()
+            ordering = [pending_order.asc(), ordered.nulls_last(), b.c.created_at.desc(), b.c.id.desc()]
+        with self._conn() as c:
+            total = int(c.execute(count_stmt).scalar_one())
+            rows = c.execute(stmt.order_by(*ordering).offset(offset).limit(limit)).mappings().all()
+            ids = [row["id"] for row in rows]
+            child_assignees: dict[int, set[str]] = defaultdict(set)
+            if ids:
+                assignee = S.users.alias("batch_assignee")
+                assignee_rows = c.execute(select(bi.c.batch_id, assignee.c.username).select_from(
+                    bi.join(S.software_requests, S.software_requests.c.id == bi.c.request_id)
+                    .join(assignee, assignee.c.id == S.software_requests.c.assignee_id))
+                    .where(bi.c.batch_id.in_(ids))).all()
+                for bid, name in assignee_rows:
+                    child_assignees[bid].add(name)
+        result = []
+        for row in rows:
+            data = dict(row)
+            data["batch_no"] = f"SWB-{data['id']:06d}"
+            batch_host_id = data["host_id"]
+            data["host"] = {"host_id": batch_host_id, "hostname": data.pop("hostname") or "",
+                            "last_seen": data.pop("last_seen")}
+            data["status_counts"] = {state: data.pop(f"status_{state}") for state in status_values}
+            data["security_impact_counts"] = {state: data.pop(f"impact_{state}") for state in impact_states}
+            data["assignees"] = sorted(child_assignees.get(data["id"], ()))
+            result.append(data)
+        return total, result
+
+    def get_software_request_batch(self, batch_id: int, at: str) -> dict[str, Any] | None:
+        b, host = S.software_request_batches, S.hosts
+        requester = S.users.alias("batch_requester")
+        with self._conn() as c:
+            row = c.execute(select(b, requester.c.username.label("requester_name"),
+                host.c.hostname, host.c.last_seen).select_from(b.join(requester, requester.c.id == b.c.requester_id)
+                    .outerjoin(host, host.c.host_id == b.c.host_id)).where(b.c.id == batch_id)).mappings().first()
+            if row is None:
+                return None
+            batch = dict(row)
+            children = c.execute(select(S.software_request_batch_items.c.request_id).where(
+                S.software_request_batch_items.c.batch_id == batch_id)
+                .order_by(S.software_request_batch_items.c.item_order)).all()
+        items = []
+        for (request_id,) in children:
+            item = self.get_software_request(int(request_id))
+            if item is None:
+                continue
+            item["batch_id"] = batch_id
+            item["host_ids"] = [batch["host_id"]]
+            item["current_installed"] = self.software_product_installed(item["source"], item["name"],
+                item["arch"], item["version"], [batch["host_id"]])
+            item["impact_cves"] = self._software_request_cves(item)
+            item["security_impact"] = {"status": self._software_request_impact(item),
+                                         "cve_count": len(item["impact_cves"])}
+            with self._conn() as c:
+                active_approvals = c.execute(select(S.software_approvals.c.valid_until).where(and_(
+                    S.software_approvals.c.host_id == batch["host_id"],
+                    S.software_approvals.c.source == item["source"], S.software_approvals.c.name == item["name"],
+                    S.software_approvals.c.arch == item["arch"], S.software_approvals.c.version == item["version"],
+                    S.software_approvals.c.state == "active", S.software_approvals.c.valid_from <= at,
+                    S.software_approvals.c.valid_until >= at, S.software_approvals.c.ended_at.is_(None)))).all()
+            approvals = [row[0] for row in active_approvals]
+            item["approval_status"] = "active" if approvals else "not_active"
+            item["current_approval_until"] = max(approvals, default=None)
+            items.append(item)
+        status_values = ("submitted", "reviewing", "needs_changes", "approved", "rejected", "withdrawn")
+        impact_states = ("confirmed", "needs_review", "not_affected", "no_observed_match", "not_assessed")
+        status_counts = {state: sum(i["status"] == state for i in items) for state in status_values}
+        impact_counts = {state: sum(i["security_impact"]["status"] == state for i in items)
+                         for state in impact_states}
+        item_count = len(items)
+        status = next((state for state in status_values if status_counts[state] == item_count), "mixed")
+        security = next((state for state in impact_states if impact_counts[state] == item_count), "mixed")
+        pending = status_counts["submitted"] + status_counts["reviewing"]
+        opened = pending + status_counts["needs_changes"]
+        terminal = status_counts["approved"] + status_counts["rejected"] + status_counts["withdrawn"]
+        due = min((i["due_at"] for i in items if i["due_at"] and i["status"] in
+                   {"submitted", "reviewing", "needs_changes"}), default=None)
+        batch.update(id=batch_id, batch_no=f"SWB-{batch_id:06d}", host_id=batch["host_id"],
+            host={"host_id": batch["host_id"], "hostname": batch.pop("hostname") or "",
+                  "last_seen": batch.pop("last_seen")}, items=items, item_count=item_count,
+            status=status, status_counts=status_counts, pending_count=pending, open_count=opened,
+            terminal_count=terminal, security_impact=security, security_impact_counts=impact_counts,
+            assignees=sorted({i["assignee_name"] for i in items if i["assignee_name"]}), due_at=due)
+        return batch
+
+    def _software_request_cves(self, item: dict[str, Any]) -> list[dict[str, Any]]:
+        m, v, kev = S.vulnerability_product_matches, S.vulnerability_match_versions, S.kev_entries
+        version_exact = exists(select(v.c.version).where(and_(v.c.cve_id == m.c.cve_id,
+            v.c.source == m.c.source, v.c.name == m.c.name, v.c.arch == m.c.arch,
+            v.c.version == item["version"])))
+        stmt = select(m.c.cve_id, m.c.status, version_exact.label("version_exact"),
+            kev.c.cve_id.is_not(None).label("is_kev")).select_from(m.outerjoin(kev, kev.c.cve_id == m.c.cve_id)).where(and_(
+                m.c.source == item["source"], m.c.name == item["name"], m.c.arch == item["arch"]))
+        with self._conn() as c:
+            rows = c.execute(stmt.order_by(m.c.cve_id)).mappings().all()
+        result = []
+        for row in rows:
+            status = row["status"]
+            if status == "affected_confirmed":
+                impact = "confirmed" if row["version_exact"] else "no_observed_match"
+            else:
+                impact = status
+            result.append({"cve_id": row["cve_id"], "is_kev": bool(row["is_kev"]), "impact_status": impact})
+        return result
+
+    def _software_request_impact(self, item: dict[str, Any]) -> str:
+        states = {row["impact_status"] for row in self._software_request_cves(item)}
+        if "confirmed" in states:
+            return "confirmed"
+        if "needs_review" in states:
+            return "needs_review"
+        if not states:
+            return "not_assessed"
+        if states == {"not_affected"}:
+            return "not_affected"
+        return "no_observed_match"
+
+    def update_software_request_batch(self, batch_id: int, actions: list[dict[str, Any]],
+                                      actor_id: str, at: str) -> None:
+        if not actions or len({a["request_id"] for a in actions}) != len(actions):
+            raise ValueError("요청 항목을 확인하세요.")
+        b, bi, t = S.software_request_batches, S.software_request_batch_items, S.software_requests
+        p, classification, targets = S.installed_packages, S.software_classifications, S.software_request_hosts
+        a, events, approvals = S.software_approvals, S.software_request_events, S.software_approvals
+        with self.transaction(), self._conn(write=True) as c:
+            batch = c.execute(select(b.c.host_id).where(b.c.id == batch_id)).scalar_one_or_none()
+            if batch is None:
+                raise KeyError("request batch not found")
+            request_ids = [action["request_id"] for action in actions]
+            memberships = c.execute(select(bi.c.request_id, t.c.revision, t.c.status, t.c.source,
+                t.c.name, t.c.arch, t.c.version).select_from(bi.join(t, t.c.id == bi.c.request_id))
+                .where(and_(bi.c.batch_id == batch_id, bi.c.request_id.in_(request_ids)))).mappings().all()
+            if len(memberships) != len(actions):
+                raise ValueError("묶음에 포함된 요청 항목만 처리할 수 있습니다.")
+            by_id = {row["request_id"]: row for row in memberships}
+            host_rows = c.execute(select(targets.c.request_id, targets.c.host_id).where(
+                targets.c.request_id.in_(request_ids))).all()
+            child_hosts: dict[int, set[str]] = defaultdict(set)
+            for request_id, host_id in host_rows:
+                child_hosts[request_id].add(host_id)
+            for action in actions:
+                current = by_id.get(action["request_id"])
+                if current is None or current["revision"] != action["expected_revision"]:
+                    raise ConflictError("software request batch revision changed")
+                if action.get("values", {}).get("status") == "approved":
+                    if child_hosts.get(action["request_id"]) != {batch}:
+                        raise ConflictError("batch child host scope changed")
+                    classified = c.execute(select(classification.c.category).where(and_(
+                        classification.c.source == current["source"], classification.c.name == current["name"],
+                        classification.c.arch == current["arch"])).with_for_update()).scalar_one_or_none()
+                    present = c.execute(select(p.c.host_id).where(and_(p.c.host_id == batch,
+                        p.c.source == current["source"], p.c.name == current["name"],
+                        p.c.arch == current["arch"], p.c.version == current["version"])).limit(1)
+                        .with_for_update()).first()
+                    if classified != "business_app" or not present:
+                        raise ConflictError("exact installed business application changed")
+                    active = c.execute(select(a.c.id).where(and_(a.c.host_id == batch,
+                        a.c.source == current["source"], a.c.name == current["name"],
+                        a.c.arch == current["arch"], a.c.version == current["version"],
+                        a.c.state == "active", a.c.valid_from <= at, a.c.valid_until >= at,
+                        a.c.ended_at.is_(None))).limit(1)).first()
+                    if active:
+                        raise ConflictError("exact software approval already exists")
+                    for approval in action.get("approvals") or []:
+                        if (approval["host_id"] != batch or approval["source"] != current["source"] or
+                                approval["name"] != current["name"] or approval["arch"] != current["arch"] or
+                                approval["version"] != current["version"]):
+                            raise ConflictError("batch approval scope changed")
+            for action in actions:
+                rid, expected = action["request_id"], action["expected_revision"]
+                current = by_id[rid]
+                values = action["values"]
+                result = c.execute(update(t).where(and_(t.c.id == rid, t.c.revision == expected)).values(
+                    **values, updated_at=at, revision=expected + 1))
+                if result.rowcount != 1:
+                    raise ConflictError("software request batch revision changed")
+                next_status = values.get("status", current["status"])
+                c.execute(insert(events).values(request_id=rid, actor_id=actor_id, action=action["action"],
+                    from_status=current["status"], to_status=next_status, reason=action["reason"],
+                    detail=json.dumps(action["detail"], sort_keys=True), revision=expected + 1, occurred_at=at))
+                if action.get("approvals"):
+                    c.execute(insert(approvals), action["approvals"])
+                if action.get("revoke_approvals"):
+                    c.execute(update(a).where(and_(a.c.request_id == rid, a.c.state == "active")).values(
+                        state="revoked", ended_at=at, end_reason=action["reason"]))
+
     def list_software_requests(self, *, requester_id: str | None = None, status: str | None = None, q: str = "",
                                unassigned: bool = False, overdue_before: str | None = None,
                                offset: int = 0, limit: int = 50, assignee_id: str | None = None,
                                pending: bool = False, sort: str | None = None,
-                               direction: str = "asc", security_impact: str | None = None) -> tuple[int, list[dict[str, Any]]]:
+                               direction: str = "asc",
+                               security_impact: str | None = None) -> tuple[int, list[dict[str, Any]]]:
         t, u, assignee = S.software_requests, S.users.alias("requester"), S.users.alias("assignee")
         targets, p = S.software_request_hosts, S.installed_packages
         m, v = S.vulnerability_product_matches, S.vulnerability_match_versions
@@ -1005,6 +1359,9 @@ class SqlInventoryRepository(InventoryRepository):
                 return None
             data = dict(row)
             data["request_no"] = f"SW-{data['id']:06d}"
+            batch_id = c.execute(select(S.software_request_batch_items.c.batch_id).where(
+                S.software_request_batch_items.c.request_id == request_id)).scalar_one_or_none()
+            data["batch_id"] = batch_id
             targets = c.execute(select(S.software_request_hosts.c.host_id, S.hosts.c.hostname)
                 .select_from(S.software_request_hosts.join(S.hosts, S.hosts.c.host_id == S.software_request_hosts.c.host_id))
                 .where(S.software_request_hosts.c.request_id == request_id).order_by(S.hosts.c.hostname)).mappings().all()

@@ -298,6 +298,19 @@ software_requests = Table("software_requests", metadata,
 )
 Index("ix_software_requests_status", software_requests.c.status, software_requests.c.due_at)
 Index("ix_software_requests_owner", software_requests.c.requester_id, software_requests.c.created_at)
+# A batch groups independent one-host request rows. Legacy multi-host requests remain unlinked.
+software_request_batches = Table("software_request_batches", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("requester_id", String(32), ForeignKey("users.id"), nullable=False),
+    # No host FK: host identity is also recorded on each child request and this must not add
+    # another host-deletion dependency to the existing request/approval history.
+    Column("host_id", String(128), nullable=False),
+    Column("purpose", String(2000), nullable=False),
+    Column("license_evidence", String(2000), nullable=False),
+    Column("created_at", _TS, nullable=False),
+)
+Index("ix_software_request_batches_owner", software_request_batches.c.requester_id,
+      software_request_batches.c.created_at)
 software_request_hosts = Table("software_request_hosts", metadata,
     Column("request_id", Integer, ForeignKey("software_requests.id"), nullable=False),
     Column("host_id", String(128), ForeignKey("hosts.host_id"), nullable=False),
@@ -313,6 +326,15 @@ software_request_events = Table("software_request_events", metadata,
     Column("occurred_at", _TS, nullable=False),
 )
 Index("ix_software_request_events", software_request_events.c.request_id, software_request_events.c.id)
+software_request_batch_items = Table("software_request_batch_items", metadata,
+    Column("batch_id", Integer, ForeignKey("software_request_batches.id"), nullable=False),
+    Column("request_id", Integer, ForeignKey("software_requests.id"), nullable=False),
+    Column("item_order", Integer, nullable=False),
+    PrimaryKeyConstraint("batch_id", "request_id"),
+    UniqueConstraint("request_id", name="uq_software_request_batch_item_request"),
+)
+Index("ix_software_request_batch_items_order", software_request_batch_items.c.batch_id,
+      software_request_batch_items.c.item_order)
 software_approvals = Table("software_approvals", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("request_id", Integer, ForeignKey("software_requests.id"), nullable=False),

@@ -585,22 +585,23 @@ def test_blank_values_sort_last_in_both_directions_and_count_columns_start_desce
 def test_version_columns_sort_by_number_tokens(site, make_page):
     page = make_page()
     open_route(page, site.base, site.route("big_host"))
-    section = page.locator(".table-wrap", has=page.locator("th", has_text="아키텍처"))
-    header = section.locator("thead th", has_text="버전")
+    section = page.locator("details#host-software")
+    table = section.locator("table.software-table")
+    header = table.locator("thead th").filter(has_text="설치 버전")
     key = lambda v: tuple(int(x) for x in v.split("."))   # noqa: E731
     everything = [f"2.{i % 12}.{i % 5}" for i in range(450)]
     # 오름차순: 앞 200행은 2.0.x … 2.5.x 라 사전순과 같아 보이므로, 구분은 내림차순에서 한다
     header.get_by_role("button").click()
     expect(header).to_have_attribute("aria-sort", "ascending")
-    asc = section.locator("tbody tr td:nth-child(2)").all_inner_texts()
+    asc = table.locator("tbody tr td.software-version").all_inner_texts()
     assert [key(v) for v in asc] == [key(v) for v in sorted(everything, key=key)[:200]]
     header.get_by_role("button").click()
     expect(header).to_have_attribute("aria-sort", "descending")
-    desc = section.locator("tbody tr td:nth-child(2)").all_inner_texts()
+    desc = table.locator("tbody tr td.software-version").all_inner_texts()
     assert [key(v) for v in desc] == [key(v) for v in sorted(everything, key=key, reverse=True)[:200]]
     assert desc[0].startswith("2.11."), desc[:3]                    # 사전순 내림차순이면 2.9.x 로 시작한다
     # 안정 정렬: 같은 버전은 원래(패키지명) 순서
-    names = section.locator("tbody tr td:nth-child(1)").all_inner_texts()
+    names = table.locator("tbody tr td.software-name").all_inner_texts()
     same = [n for n, v in zip(names, desc) if v == desc[0]]
     assert same == sorted(same), same
 
@@ -608,8 +609,9 @@ def test_version_columns_sort_by_number_tokens(site, make_page):
 def test_tables_render_200_rows_then_show_more(site, make_page):
     page = make_page()
     open_route(page, site.base, site.route("big_host"))
-    section = page.locator(".table-wrap", has=page.locator("th", has_text="아키텍처"))
-    rows = section.locator("tbody tr")
+    section = page.locator("details#host-software")
+    table = section.locator("table.software-table")
+    rows = table.locator("tbody tr")
     expect(rows).to_have_count(200)
     more = section.get_by_role("button", name=re.compile("개 더 보기"))
     expect(more).to_have_text("200개 더 보기")
