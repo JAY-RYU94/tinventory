@@ -112,7 +112,7 @@ class SecurityHeadersMiddleware:
                 if not path.startswith(_NO_CSP_PATHS):
                     headers.append((b"content-security-policy", _CSP.encode()))
                     headers.append((b"x-frame-options", b"DENY"))
-                if path.startswith("/v1/"):
+                if path.startswith("/v1/") or path in ("/mcp", "/mcp/"):
                     headers.append((b"cache-control", b"no-store"))
                 msg = {**msg, "headers": headers}
             await send(msg)

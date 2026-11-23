@@ -161,6 +161,8 @@ PYTHONPATH=src python3 -m swinventory.server.contract --write   # 계약 스키�
 - 검증 환경: Docker 가상 디스크가 100% 가 되면 PostgreSQL 이 unhealthy 로 떠서 e2e 가 **조용히** 실패한다(`compose up` 출력을 `/dev/null` 로 버린다). 수상하면 `docker run --rm alpine df -h /` 부터 본다. 원격 설치 스크립트를 `curl | sh` 로 실행하는 검증은 하지 않는다(k3s 는 공식 이미지에서 바이너리만 꺼낸다).
 
 ## 화면 UX 규칙(`tests/ui/test_ui_ux.py` 가 실제 브라우저로 강제)
+- **업무 단위 화면**: 내 계정(`/accounts`)·사용자 관리(`/users`)·API 토큰(`/tokens`)을 분리한다. 목록이 기본이고 추가/편집/회수는 네이티브 dialog로 수행한다. 저장 후 전체 `render()`를 호출해 다른 입력을 지우지 않는다. 계정 편집은 변경 감지·취소, 토큰 회수는 이름·영향 확인이 필수다.
+- **탐색·초안**: 데스크톱은 좌측 그룹 메뉴, 900px 이하에서는 메뉴 버튼·Escape로 닫는 탐색을 쓴다. 서버는 처음에는 접고 같은 경로의 검색/필터 갱신에서는 host_id별 열림을 유지한다. 폼 초안은 탭 메모리의 비밀 아닌 필드만 보관한다. 비밀번호·JWT를 초안/sessionStorage에 추가하지 않는다(인증에 쓰는 JWT의 기존 TOKEN_KEY는 별도 계약).
 - **역할 인지**: 로그인 때 `/v1/whoami` 로 역할을 받아 헤더에 표시하고, 조회 토큰이면 관리자 전용 컨트롤을 **미리 비활성화**한다(이유는 `title`·안내문, 403 문구는 상수 `ADMIN_ONLY` 하나). 이것은 편의다 — **권한 검사는 서버가 한다**(UI 를 우회해도 403).
 - **390px 에서 어느 화면도 가로로 넘치지 않는다**, 이름 없는 입력 0, 라이트·다크 모든 글자 대비 ≥ 4.5, 분포 막대는 `<button>`, `aria-current`·`document.title`·h1 초점 이동, 결과는 `role=status`/`alert`.
 - **CSV 는 화면에 보이는 조건 그대로**(필터·검색어를 서버 `q` 등으로 보낸다). 화면 검색을 클라이언트에서만 하면 CSV 와 어긋난다.
@@ -172,3 +174,9 @@ PYTHONPATH=src python3 -m swinventory.server.contract --write   # 계약 스키�
 - **초점은 경로가 바뀔 때만 h1 로**: 같은 경로에서 쿼리만 바뀌면(필터 select 등) 다시 그린 뒤 같은 컨트롤에 초점을 돌려준다.
 - 이벤트 '이후' 날짜는 **로컬 자정의 UTC 시각(`…Z`)** 으로 보낸다(시간대 없는 값은 서버가 UTC 로 본다). IP 목록 `q` 는 자산번호도 찾는다.
 
+
+
+## OpenAPI·MCP 규칙
+- REST 인증은 `auth.py`의 Bearer 보안 의존성·권한 검사가 정본이다. `openapi.py`는 의존성에서 역할을 읽고 문서화한다. 문서에만 인증을 표시하거나 기존 401/403 동작을 바꾸지 않는다.
+- `server/mcp.py`는 명시적 GET 허용 목록과 OpenAPI 쿼리 스키마를 사용한다. 임의 URL·경로 보간·관리자 토큰 대입·쓰기 도구를 추가하지 않는다. 원래 요청 토큰으로 같은 앱의 REST를 호출해 필터·소유·충돌 판정을 공유한다.
+- MCP는 무상태 Streamable HTTP이고 세션에 인증 결과를 캐시하지 않는다. 요청별 JWT 검증·회수 반영·Origin 검사·입력/출력 상한·안전한 오류를 유지한다. SDK 업그레이드 시 `tests/server/test_integrations.py`의 공식 클라이언트 초기화와 도구 호출을 확인한다.

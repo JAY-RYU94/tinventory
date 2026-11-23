@@ -30,6 +30,14 @@ docker create --name swinv-e2e-dockercli docker:cli >/dev/null && docker cp swin
 docker compose -p $P up -d --build >/dev/null 2>&1
 for i in $(seq 1 60); do curl -fsS $API/healthz >/dev/null 2>&1 && break; sleep 1; done
 curl -fsS $API/healthz >/dev/null && pass "서버+PostgreSQL 기동·헬스체크" || { bad "서버 기동 실패"; docker compose -p $P logs server | tail -20; exit 1; }
+# OpenAPI 보안 스키마와 실제 HTTP MCP 초기화·조회(기존 조회 토큰).
+curl -fsS "$API/openapi.json" | jq_ "d['components']['securitySchemes']['BearerAuth']['scheme']" | grep -qx bearer && pass "OpenAPI Bearer 인증 문서" || bad "OpenAPI"
+MCP_HEADERS=(-H 'Authorization: Bearer e2e-read' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'MCP-Protocol-Version: 2025-11-25')
+curl -fsS "${MCP_HEADERS[@]}" -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"docker-e2e","version":"1"}}}' "$API/mcp" | jq_ "d['result']['serverInfo']['name']" | grep -qx swinventory && pass "MCP HTTP 초기화" || bad "MCP 초기화"
+curl -fsS "${MCP_HEADERS[@]}" -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"inventory_hosts","arguments":{}}}' "$API/mcp" | jq_ "d['result']['structuredContent']['total']" | grep -qx 0 && pass "MCP HTTP 조회" || bad "MCP 조회"
+code=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{}' "$API/mcp")
+[ "$code" = 401 ] && pass "MCP 무인증 차단" || bad "MCP 무인증: $code"
+
 NET=${P}_default
 
 # 컨테이너는 시스템 python3 로 에이전트를 돌린다(우분투 22.04=3.10, 데비안 12=3.11, 로키 9=3.9)

@@ -4,7 +4,19 @@ import hmac
 from dataclasses import dataclass
 from typing import Callable
 
-from fastapi import Header, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
+from fastapi.security import HTTPBearer
+
+
+class _BearerHeader(HTTPBearer):
+    """OpenAPI에 보안 스키마를 제공하고 기존 인증 오류 계약은 그대로 유지한다."""
+
+    async def __call__(self, request: Request) -> str | None:
+        return request.headers.get("authorization")
+
+
+bearer_header = _BearerHeader(scheme_name="BearerAuth", auto_error=False,
+    description="로그인 JWT 또는 관리자가 발급한 API JWT. 기존 배포 Bearer 토큰도 지원합니다.")
 
 
 @dataclass(frozen=True)
@@ -59,20 +71,26 @@ class Authenticator:
                                 headers={"WWW-Authenticate": "Bearer"})
         return roles
 
-    def require(self, role: str) -> Callable[..., None]:
-        def dependency(authorization: str | None = Header(default=None)) -> None:
-            if role not in self._caller_roles(authorization):
-                raise HTTPException(status.HTTP_403_FORBIDDEN, "insufficient role")
+    def check(self, authorization: str | None, role: str) -> None:
+        """REST와 MCP가 공유하는 요청별 권한 판정."""
+        if role not in self._caller_roles(authorization):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "insufficient role")
 
+    def require(self, role: str) -> Callable[..., None]:
+        def dependency(authorization: str | None = Depends(bearer_header)) -> None:
+            self.check(authorization, role)
+
+        dependency.required_role = role
         return dependency
 
     def caller_role(self) -> Callable[..., str]:
         """조회 권한 이상인 호출자의 가장 높은 역할("admin" 또는 "read")을 돌려주는 의존성. 수집 전용 토큰은 403.
         화면이 관리자 전용 버튼을 보일지 정하는 안내일 뿐이다 — 실제 차단은 각 라우트의 require 가 따로 한다."""
-        def dependency(authorization: str | None = Header(default=None)) -> str:
+        def dependency(authorization: str | None = Depends(bearer_header)) -> str:
             roles = self._caller_roles(authorization)
             if "read" not in roles:
                 raise HTTPException(status.HTTP_403_FORBIDDEN, "insufficient role")
-            return "admin" if "admin" in roles else "read"
+            return "admin" if "admin" in roles else "request" if "request" in roles else "read"
 
+        dependency.required_role = "read"
         return dependency

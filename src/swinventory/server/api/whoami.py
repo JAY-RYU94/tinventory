@@ -14,7 +14,7 @@ def build_router(caller_role: Callable[..., str]) -> APIRouter:
 
     @router.get("/whoami")
     def whoami(role: str = Depends(caller_role)) -> dict:
-        """{"role": "admin" | "read"}. 토큰이 없거나 틀리면 401, 수집 전용 토큰이면 403."""
+        """{"role": "admin" | "request" | "read"}. 토큰이 없거나 틀리면 401, 수집 전용 토큰이면 403."""
         return {"role": role}
 
     return router

@@ -9,7 +9,7 @@ from contextvars import ContextVar
 from typing import Any, Iterable, Iterator
 
 from sqlalchemy import (
-    Connection, Engine, and_, create_engine, delete, distinct, event, exists, func, insert, select, update,
+    Connection, Engine, and_, case, cast, create_engine, delete, distinct, event, exists, func, insert, inspect, or_, select, text, update,
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import StaticPool
@@ -49,6 +49,13 @@ class SqlInventoryRepository(InventoryRepository):
         self._auth_thread_lock = threading.RLock()
         self._tx: ContextVar[Connection | None] = ContextVar(f"inventory_tx_{id(self)}", default=None)
         S.metadata.create_all(engine)
+        # create_all 은 기존 테이블의 새 컬럼을 추가하지 않는다. 관리 자산 수정 잠금은 이전
+        # SQLite/PostgreSQL 데이터베이스에도 기본 revision 1로 적용한다.
+        with engine.begin() as c:
+            if "assets" in inspect(c).get_table_names():
+                columns = {column["name"] for column in inspect(c).get_columns("assets")}
+                if "revision" not in columns:
+                    c.execute(text("ALTER TABLE assets ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"))
         # 첫 행 생성도 여러 프로세스에서 멱등이다. 아래 UPDATE 가 DB 간 공통 쓰기 잠금이다.
         if engine.dialect.name == "postgresql":
             from sqlalchemy.dialects.postgresql import insert as guard_insert
@@ -132,6 +139,25 @@ class SqlInventoryRepository(InventoryRepository):
                 host_id=host_id, collected_at=collected_at, received_at=received_at,
                 collected=json.dumps(collected), errors=json.dumps(errors, sort_keys=True)))
             return int(res.inserted_primary_key[0])
+
+    def record_source_results(self, host_id: str, collected: Iterable[str], errors: dict[str, str], at: str) -> None:
+        t = S.host_source_freshness
+        if self._engine.dialect.name == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert as dialect_insert
+        else:
+            from sqlalchemy.dialects.sqlite import insert as dialect_insert
+        successes = set(collected)
+        with self._conn(write=True) as c:
+            for source in sorted(successes | set(errors)):
+                if source in successes:
+                    stmt = dialect_insert(t).values(host_id=host_id, source=source, last_success_at=at,
+                        last_attempt_at=at, state="ok", last_error="")
+                    updates = {"last_success_at": at, "last_attempt_at": at, "state": "ok", "last_error": ""}
+                else:
+                    stmt = dialect_insert(t).values(host_id=host_id, source=source, last_success_at=None,
+                        last_attempt_at=at, state="failed", last_error=errors[source])
+                    updates = {"last_attempt_at": at, "state": "failed", "last_error": errors[source]}
+                c.execute(stmt.on_conflict_do_update(index_elements=[t.c.host_id, t.c.source], set_=updates))
 
     def synced_sources(self, host_id: str) -> set[str]:
         with self._conn() as c:
@@ -315,7 +341,7 @@ class SqlInventoryRepository(InventoryRepository):
     @staticmethod
     def _delete_host_rows(c: Connection, host_id: str) -> None:
         # FK 순서: events(→snapshots) → 나머지 자식 → snapshots → hosts
-        for t in (S.change_events, S.host_tags, S.host_sources, S.installed_packages, S.host_addresses,
+        for t in (S.change_events, S.host_tags, S.host_sources, S.host_source_freshness, S.installed_packages, S.host_addresses,
                   S.host_interfaces, S.host_ports, S.host_kernels, S.host_kernel_state, S.host_hardware, S.host_containers, S.host_k8s, S.snapshots):
             c.execute(delete(t).where(t.c.host_id == host_id))
         c.execute(delete(S.hosts).where(S.hosts.c.host_id == host_id))
@@ -414,6 +440,8 @@ class SqlInventoryRepository(InventoryRepository):
             pkgs = c.execute(select(p.c.source, p.c.name, p.c.version, p.c.arch)
                              .where(p.c.host_id == host_id).order_by(p.c.name, p.c.version)).mappings().all()
             tags = self._tags_for(c, [host_id]).get(host_id, {})
+            freshness = [dict(r) for r in c.execute(select(S.host_source_freshness).where(
+                S.host_source_freshness.c.host_id == host_id).order_by(S.host_source_freshness.c.source)).mappings()]
             events = self.list_events(host_id=host_id, limit=50)
         ifaces, ports = self.get_network(host_id)
         hardware = self.get_hardware(host_id)
@@ -430,6 +458,7 @@ class SqlInventoryRepository(InventoryRepository):
             "kernels": sorted(({"version": k["version"], "is_running": bool(k["is_running"])} for k in kernels),
                               key=lambda k: version_key(k["version"]), reverse=True),
             "packages": [dict(r) for r in pkgs],
+            "source_freshness": freshness,
             "tags": tags,
             "events": events,
         }
@@ -515,16 +544,19 @@ class SqlInventoryRepository(InventoryRepository):
         return {"name": name, "versions": versions, "hosts": [dict(r) for r in hosts]}
 
     def list_events(self, host_id: str | None = None, event_type: str | None = None,
-                    since: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+                    since: str | None = None, limit: int | None = 100, offset: int = 0) -> list[dict[str, Any]]:
         e, h = S.change_events, S.hosts
-        q = (select(e, h.c.hostname).select_from(e.join(h, h.c.host_id == e.c.host_id))
-             .order_by(e.c.id.desc()).limit(limit))
+        q = select(e, h.c.hostname).select_from(e.join(h, h.c.host_id == e.c.host_id)).order_by(e.c.id.desc())
         if host_id:
             q = q.where(e.c.host_id == host_id)
         if event_type:
             q = q.where(e.c.event_type == event_type)
         if since:
             q = q.where(e.c.occurred_at >= since)
+        if limit is not None:
+            q = q.limit(limit)
+        if offset:
+            q = q.offset(offset)
         with self._conn() as c:
             rows = c.execute(q).mappings().all()
         out = []
@@ -533,6 +565,19 @@ class SqlInventoryRepository(InventoryRepository):
             d["detail"] = json.loads(d["detail"])
             out.append(d)
         return out
+
+    def count_events(self, host_id: str | None = None, event_type: str | None = None,
+                     since: str | None = None) -> int:
+        e = S.change_events
+        stmt = select(func.count()).select_from(e)
+        if host_id:
+            stmt = stmt.where(e.c.host_id == host_id)
+        if event_type:
+            stmt = stmt.where(e.c.event_type == event_type)
+        if since:
+            stmt = stmt.where(e.c.occurred_at >= since)
+        with self._conn() as c:
+            return int(c.execute(stmt).scalar_one())
 
     def package_version_spread(self, min_versions: int = 3, limit: int = 20) -> list[dict[str, Any]]:
         p = S.installed_packages
@@ -608,14 +653,446 @@ class SqlInventoryRepository(InventoryRepository):
             res = c.execute(insert(S.assets).values(**self._asset_values(values), created_at=at, updated_at=at))
             return int(res.inserted_primary_key[0])
 
-    def update_asset(self, asset_id: int, values: dict[str, Any], at: str) -> bool:
+    def update_asset(self, asset_id: int, values: dict[str, Any], at: str, expected_revision: int | None = None) -> bool:
         with self.transaction(), self._conn(write=True) as c:
-            res = c.execute(update(S.assets).where(S.assets.c.id == asset_id).values(**self._asset_values(values), updated_at=at))
+            where = S.assets.c.id == asset_id
+            update_values = {**self._asset_values(values), "updated_at": at}
+            if expected_revision is not None:
+                where = and_(where, S.assets.c.revision == expected_revision)
+                update_values["revision"] = expected_revision + 1
+            else:  # 구형 클라이언트와의 호환 쓰기도 revision 을 증가시켜 열린 폼을 무효화한다.
+                update_values["revision"] = S.assets.c.revision + 1
+            res = c.execute(update(S.assets).where(where).values(**update_values))
+            if res.rowcount == 0 and expected_revision is not None:
+                if c.execute(select(S.assets.c.id).where(S.assets.c.id == asset_id)).first():
+                    raise ConflictError("asset revision changed")
             return res.rowcount > 0
 
     def delete_asset(self, asset_id: int) -> bool:
         with self.transaction(), self._conn(write=True) as c:
             return c.execute(delete(S.assets).where(S.assets.c.id == asset_id)).rowcount > 0
+
+    # --- 업무용 SW 분류·승인 요청 ---------------------------------------
+    @staticmethod
+    def _software_key(source: str, name: str, arch: str) -> Any:
+        p, m = S.installed_packages, S.software_classifications
+        return and_(m.c.source == p.c.source, m.c.name == p.c.name, m.c.arch == p.c.arch)
+
+    def list_software_products(self, q: str = "", category: str | None = None,
+                               offset: int = 0, limit: int = 100) -> tuple[int, list[dict[str, Any]]]:
+        p, m = S.installed_packages, S.software_classifications
+        join = p.outerjoin(m, and_(m.c.source == p.c.source, m.c.name == p.c.name, m.c.arch == p.c.arch))
+        cat = func.coalesce(m.c.category, "needs_review")
+        stmt = (select(p.c.source, p.c.name, p.c.arch, cat.label("category"),
+                       func.coalesce(m.c.product_name, "").label("product_name"),
+                       func.coalesce(m.c.publisher, "").label("publisher"),
+                       func.coalesce(m.c.evidence, "").label("classification_evidence"),
+                       m.c.updated_by, m.c.updated_at, m.c.revision,
+                       func.count().label("install_count"), func.count(distinct(p.c.host_id)).label("host_count"),
+                       func.count(distinct(p.c.version)).label("version_count"))
+                .select_from(join).group_by(p.c.source, p.c.name, p.c.arch, cat, m.c.product_name,
+                                           m.c.publisher, m.c.evidence, m.c.updated_by, m.c.updated_at, m.c.revision))
+        if q:
+            pattern = f"%{_escape_like(q.casefold())}%"
+            stmt = stmt.where(func.lower(p.c.name).like(pattern, escape="\\"))
+        if category:
+            stmt = stmt.where(cat == category)
+        subquery = stmt.subquery()
+        with self._conn() as c:
+            total = int(c.execute(select(func.count()).select_from(subquery)).scalar_one())
+            rows = c.execute(stmt.order_by(p.c.name, p.c.source, p.c.arch).offset(offset).limit(limit)).mappings().all()
+            return total, [dict(r) for r in rows]
+
+    def get_software_classification(self, source: str, name: str, arch: str) -> dict[str, Any] | None:
+        with self._conn() as c:
+            row = c.execute(select(S.software_classifications).where(and_(
+                S.software_classifications.c.source == source, S.software_classifications.c.name == name,
+                S.software_classifications.c.arch == arch))).mappings().first()
+        return dict(row) if row else None
+
+    def set_software_classification(self, source: str, name: str, arch: str, values: dict[str, Any],
+                                    actor_id: str, at: str, expected_revision: int | None) -> dict[str, Any]:
+        t, p, ev = S.software_classifications, S.installed_packages, S.software_classification_events
+        with self.transaction(), self._conn(write=True) as c:
+            if c.execute(select(p.c.host_id).where(and_(p.c.source == source, p.c.name == name,
+                                                         p.c.arch == arch)).limit(1)).first() is None:
+                raise KeyError("software product not found")
+            current = c.execute(select(t).where(and_(t.c.source == source, t.c.name == name,
+                                                      t.c.arch == arch))).mappings().first()
+            if current is None:
+                if expected_revision is not None:
+                    raise ConflictError("software classification changed")
+                revision = 1
+                c.execute(insert(t).values(source=source, name=name, arch=arch, **values,
+                                           updated_by=actor_id, updated_at=at, revision=revision))
+                old_category = None
+            else:
+                if expected_revision is None or current["revision"] != expected_revision:
+                    raise ConflictError("software classification changed")
+                revision = expected_revision + 1
+                result = c.execute(update(t).where(and_(t.c.source == source, t.c.name == name, t.c.arch == arch,
+                                                        t.c.revision == expected_revision)).values(
+                    **values, updated_by=actor_id, updated_at=at, revision=revision))
+                if result.rowcount != 1:
+                    raise ConflictError("software classification changed")
+                old_category = current["category"]
+            c.execute(insert(ev).values(source=source, name=name, arch=arch, old_category=old_category,
+                new_category=values["category"], evidence=values["evidence"], changed_by=actor_id, changed_at=at))
+            return {"source": source, "name": name, "arch": arch, **values,
+                    "updated_by": actor_id, "updated_at": at, "revision": revision}
+
+    def software_classification_history(self, source: str, name: str, arch: str) -> list[dict[str, Any]]:
+        e, u = S.software_classification_events, S.users
+        stmt = (select(e, u.c.username.label("changed_by_name")).select_from(e.join(u, e.c.changed_by == u.c.id))
+                .where(and_(e.c.source == source, e.c.name == name, e.c.arch == arch)).order_by(e.c.id.desc()))
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(stmt).mappings()]
+
+    def get_software_request_scope(self, user_id: str) -> list[str]:
+        t = S.software_request_host_scopes
+        with self._conn() as c:
+            return [r[0] for r in c.execute(select(t.c.host_id).where(t.c.user_id == user_id).order_by(t.c.host_id))]
+
+    def replace_software_request_scope(self, user_id: str, host_ids: list[str], actor_id: str, at: str) -> None:
+        t, events = S.software_request_host_scopes, S.software_request_scope_events
+        with self.transaction(), self._conn(write=True) as c:
+            old = [r[0] for r in c.execute(select(t.c.host_id).where(t.c.user_id == user_id).order_by(t.c.host_id))]
+            c.execute(delete(t).where(t.c.user_id == user_id))
+            if host_ids:
+                c.execute(insert(t), [dict(user_id=user_id, host_id=h, granted_by=actor_id, granted_at=at) for h in host_ids])
+            if old != sorted(host_ids):
+                c.execute(insert(events).values(user_id=user_id, actor_id=actor_id,
+                    old_host_ids=json.dumps(old), new_host_ids=json.dumps(sorted(host_ids)), occurred_at=at))
+
+    def software_request_scope_history(self, user_id: str) -> list[dict[str, Any]]:
+        e = S.software_request_scope_events
+        actor = S.users.alias("actor")
+        stmt = (select(e, actor.c.username.label("actor_name")).select_from(
+            e.join(actor, actor.c.id == e.c.actor_id)).where(e.c.user_id == user_id).order_by(e.c.id.desc()))
+        with self._conn() as c:
+            rows = c.execute(stmt).mappings().all()
+            return [{**dict(row), "old_host_ids": json.loads(row["old_host_ids"]),
+                     "new_host_ids": json.loads(row["new_host_ids"])} for row in rows]
+
+    def software_product_installed(self, source: str, name: str, arch: str, version: str, host_ids: list[str]) -> bool:
+        if not host_ids:
+            return False
+        p = S.installed_packages
+        with self._conn() as c:
+            rows = c.execute(select(p.c.host_id).distinct().where(and_(p.c.source == source, p.c.name == name,
+                p.c.arch == arch, p.c.version == version, p.c.host_id.in_(host_ids)))).all()
+        return {r[0] for r in rows} == set(host_ids)
+
+    def create_software_request(self, values: dict[str, Any], host_ids: list[str], actor_id: str, at: str) -> int:
+        t, targets, events, a, p = (S.software_requests, S.software_request_hosts, S.software_request_events,
+                                     S.software_approvals, S.installed_packages)
+        statuses = ("submitted", "reviewing", "needs_changes")
+        with self.transaction(), self._conn(write=True) as c:
+            duplicate = c.execute(select(t.c.id).select_from(t.join(targets, targets.c.request_id == t.c.id)).where(and_(
+                t.c.source == values["source"], t.c.name == values["name"], t.c.arch == values["arch"],
+                t.c.version == values["version"], t.c.status.in_(statuses), targets.c.host_id.in_(host_ids))).limit(1)).first()
+            if duplicate:
+                raise ConflictError(f"overlapping request:{duplicate[0]}")
+            approved = c.execute(select(a.c.id, a.c.request_id).where(and_(a.c.source == values["source"],
+                a.c.name == values["name"], a.c.arch == values["arch"], a.c.version == values["version"],
+                a.c.host_id.in_(host_ids), a.c.state == "active", a.c.valid_until >= at)).limit(1)).first()
+            if approved:
+                raise ConflictError(f"already approved:{approved[1]}")
+            for host_id in host_ids:
+                present = c.execute(select(p.c.host_id).where(and_(p.c.source == values["source"], p.c.name == values["name"],
+                    p.c.arch == values["arch"], p.c.version == values["version"], p.c.host_id == host_id)).limit(1)).first()
+                if not present:
+                    raise ValueError(f"software not installed:{host_id}")
+            res = c.execute(insert(t).values(**values, status="submitted", revision=1, created_at=at, updated_at=at))
+            request_id = int(res.inserted_primary_key[0])
+            c.execute(insert(targets), [{"request_id": request_id, "host_id": host_id} for host_id in host_ids])
+            c.execute(insert(events).values(request_id=request_id, actor_id=actor_id, action="submit",
+                from_status=None, to_status="submitted", reason="", detail=json.dumps({"host_ids": host_ids}, sort_keys=True),
+                revision=1, occurred_at=at))
+            return request_id
+
+    def list_software_requests(self, *, requester_id: str | None = None, status: str | None = None, q: str = "",
+                               unassigned: bool = False, overdue_before: str | None = None,
+                               offset: int = 0, limit: int = 50) -> tuple[int, list[dict[str, Any]]]:
+        t, u, assignee = S.software_requests, S.users.alias("requester"), S.users.alias("assignee")
+        stmt = (select(t, u.c.username.label("requester_name"), assignee.c.username.label("assignee_name"))
+                .select_from(t.join(u, t.c.requester_id == u.c.id).outerjoin(assignee, t.c.assignee_id == assignee.c.id)))
+        if requester_id:
+            stmt = stmt.where(t.c.requester_id == requester_id)
+        if status:
+            stmt = stmt.where(t.c.status == status)
+        if unassigned:
+            stmt = stmt.where(t.c.assignee_id.is_(None))
+        if overdue_before:
+            stmt = stmt.where(t.c.due_at.is_not(None), t.c.due_at < overdue_before,
+                              t.c.status.in_(("submitted", "reviewing", "needs_changes")))
+        needle = q.strip().casefold()
+        if needle:
+            stmt = stmt.where(or_(func.lower(t.c.name).like(f"%{_escape_like(needle)}%", escape="\\"),
+                                  func.lower(t.c.product_name).like(f"%{_escape_like(needle)}%", escape="\\"),
+                                  func.lower(u.c.username).like(f"%{_escape_like(needle)}%", escape="\\"),
+                                  cast(t.c.id, String).like(f"%{_escape_like(needle.removeprefix('sw-'))}%", escape="\\")))
+        subquery = stmt.with_only_columns(t.c.id).order_by(None).subquery()
+        with self._conn() as c:
+            total = int(c.execute(select(func.count()).select_from(subquery)).scalar_one())
+            rows = c.execute(stmt.order_by(t.c.created_at.desc(), t.c.id.desc()).offset(offset).limit(limit)).mappings().all()
+            result = []
+            for row in rows:
+                data = dict(row)
+                data["request_no"] = f"SW-{data['id']:06d}"
+                count = c.execute(select(func.count()).select_from(S.software_request_hosts).where(
+                    S.software_request_hosts.c.request_id == data["id"])).scalar_one()
+                data["host_count"] = int(count)
+                result.append(data)
+            return total, result
+
+    def get_software_request(self, request_id: int) -> dict[str, Any] | None:
+        t, requester, assignee = S.software_requests, S.users.alias("requester"), S.users.alias("assignee")
+        stmt = (select(t, requester.c.username.label("requester_name"), assignee.c.username.label("assignee_name"))
+                .select_from(t.join(requester, t.c.requester_id == requester.c.id)
+                             .outerjoin(assignee, t.c.assignee_id == assignee.c.id)).where(t.c.id == request_id))
+        with self._conn() as c:
+            row = c.execute(stmt).mappings().first()
+            if row is None:
+                return None
+            data = dict(row)
+            data["request_no"] = f"SW-{data['id']:06d}"
+            targets = c.execute(select(S.software_request_hosts.c.host_id, S.hosts.c.hostname)
+                .select_from(S.software_request_hosts.join(S.hosts, S.hosts.c.host_id == S.software_request_hosts.c.host_id))
+                .where(S.software_request_hosts.c.request_id == request_id).order_by(S.hosts.c.hostname)).mappings().all()
+            data["hosts"] = [dict(h) for h in targets]
+            events = c.execute(select(S.software_request_events, S.users.c.username.label("actor_name"))
+                .select_from(S.software_request_events.join(S.users, S.users.c.id == S.software_request_events.c.actor_id))
+                .where(S.software_request_events.c.request_id == request_id).order_by(S.software_request_events.c.id)).mappings().all()
+            data["history"] = [{**dict(e), "detail": json.loads(e["detail"])} for e in events]
+            approvals = c.execute(select(S.software_approvals, S.users.c.username.label("decided_by_name"))
+                .select_from(S.software_approvals.join(S.users, S.users.c.id == S.software_approvals.c.decided_by))
+                .where(S.software_approvals.c.request_id == request_id).order_by(S.software_approvals.c.id)).mappings().all()
+            data["approvals"] = [dict(a) for a in approvals]
+            return data
+
+    def update_software_request(self, request_id: int, expected_revision: int, values: dict[str, Any],
+                                actor_id: str, action: str, reason: str, detail: dict[str, Any],
+                                at: str, approvals: list[dict[str, Any]] | None = None,
+                                revoke_approvals: bool = False) -> None:
+        t, events, a = S.software_requests, S.software_request_events, S.software_approvals
+        with self.transaction(), self._conn(write=True) as c:
+            before = c.execute(select(t.c.status).where(and_(t.c.id == request_id,
+                t.c.revision == expected_revision))).first()
+            if before is None:
+                raise ConflictError("software request revision changed")
+            result = c.execute(update(t).where(and_(t.c.id == request_id, t.c.revision == expected_revision)).values(
+                **values, updated_at=at, revision=expected_revision + 1))
+            if result.rowcount != 1:
+                raise ConflictError("software request revision changed")
+            after_status = values.get("status", before[0])
+            c.execute(insert(events).values(request_id=request_id, actor_id=actor_id, action=action,
+                from_status=before[0], to_status=after_status, reason=reason,
+                detail=json.dumps(detail, sort_keys=True), revision=expected_revision + 1, occurred_at=at))
+            if approvals:
+                c.execute(insert(a), approvals)
+            if revoke_approvals:
+                c.execute(update(a).where(and_(a.c.request_id == request_id, a.c.state == "active")).values(
+                    state="revoked", ended_at=at, end_reason=reason))
+
+    # --- CVE / KEV -------------------------------------------------------
+    def _vulnerability_query(self, q: str, kev_only: bool, impact_status: str | None, host_id: str | None = None):
+        cve, kev = S.vulnerability_cves, S.kev_entries
+        m, v, p = S.vulnerability_product_matches, S.vulnerability_match_versions, S.installed_packages
+        mapped_installs = (select(p.c.host_id).select_from(m.join(p, and_(p.c.source == m.c.source,
+                p.c.name == m.c.name, p.c.arch == m.c.arch)))
+            .where(and_(m.c.cve_id == cve.c.cve_id, p.c.host_id == host_id))) if host_id else None
+        has_mapped_install = exists(mapped_installs) if mapped_installs is not None else None
+        confirmed = (select(p.c.host_id).select_from(m.join(v, and_(v.c.cve_id == m.c.cve_id,
+                v.c.source == m.c.source, v.c.name == m.c.name, v.c.arch == m.c.arch))
+                .join(p, and_(p.c.source == v.c.source, p.c.name == v.c.name, p.c.arch == v.c.arch,
+                              p.c.version == v.c.version)))
+            .where(and_(m.c.cve_id == cve.c.cve_id, m.c.status == "affected_confirmed",
+                        *(([p.c.host_id == host_id]) if host_id else []))))
+        has_confirmed = exists(confirmed)
+        if host_id:
+            host_mapping = m.join(p, and_(p.c.source == m.c.source, p.c.name == m.c.name, p.c.arch == m.c.arch))
+            host_product = and_(m.c.cve_id == cve.c.cve_id, p.c.host_id == host_id)
+            has_review = exists(select(m.c.cve_id).select_from(host_mapping).where(and_(host_product, m.c.status == "needs_review")))
+            has_mapping = has_mapped_install
+            has_non_negative_mapping = exists(select(m.c.cve_id).select_from(host_mapping).where(and_(host_product, m.c.status != "not_affected")))
+        else:
+            has_review = exists(select(m.c.cve_id).where(and_(m.c.cve_id == cve.c.cve_id, m.c.status == "needs_review")))
+            has_mapping = exists(select(m.c.cve_id).where(m.c.cve_id == cve.c.cve_id))
+            has_non_negative_mapping = exists(select(m.c.cve_id).where(and_(m.c.cve_id == cve.c.cve_id,
+                m.c.status != "not_affected")))
+        impact = case((has_confirmed, "confirmed"), (has_review, "needs_review"),
+                      (and_(has_mapping, ~has_non_negative_mapping), "not_affected"),
+                      (has_mapping, "no_observed_match"), else_="not_assessed").label("impact_status")
+        host_count = (select(func.count(distinct(p.c.host_id))).select_from(m.join(v, and_(v.c.cve_id == m.c.cve_id,
+                v.c.source == m.c.source, v.c.name == m.c.name, v.c.arch == m.c.arch))
+                .join(p, and_(p.c.source == v.c.source, p.c.name == v.c.name, p.c.arch == v.c.arch,
+                              p.c.version == v.c.version)))
+            .where(and_(m.c.cve_id == cve.c.cve_id, m.c.status == "affected_confirmed")).scalar_subquery().label("host_count"))
+        install_count = (select(func.count()).select_from(confirmed.subquery()).scalar_subquery().label("install_count"))
+        stmt = select(cve.c.cve_id, cve.c.description, cve.c.published_at, cve.c.modified_at, cve.c.cvss_score,
+                      cve.c.cvss_severity, cve.c.nvd_status, kev.c.vendor, kev.c.product, kev.c.date_added,
+                      kev.c.due_date, kev.c.ransomware_use, kev.c.catalog_version, impact,
+                      host_count, install_count).select_from(cve.outerjoin(kev, kev.c.cve_id == cve.c.cve_id)
+                      )
+        if q:
+            pattern = f"%{_escape_like(q.casefold())}%"
+            stmt = stmt.where(or_(func.lower(cve.c.cve_id).like(pattern, escape="\\"),
+                                  func.lower(cve.c.description).like(pattern, escape="\\"),
+                                  func.lower(kev.c.vendor).like(pattern, escape="\\"),
+                                  func.lower(kev.c.product).like(pattern, escape="\\")))
+        if kev_only:
+            stmt = stmt.where(kev.c.cve_id.is_not(None))
+        if has_mapped_install is not None:
+            stmt = stmt.where(has_mapped_install)
+        if impact_status:
+            stmt = stmt.where(impact == impact_status)
+        return stmt, cve, kev
+
+    def list_vulnerabilities(self, *, q: str = "", kev_only: bool = False, impact_status: str | None = None,
+                             offset: int = 0, limit: int = 50, host_id: str | None = None) -> tuple[int, list[dict[str, Any]]]:
+        stmt, cve, kev = self._vulnerability_query(q, kev_only, impact_status, host_id)
+        total_query = stmt.with_only_columns(cve.c.cve_id).order_by(None).subquery()
+        priority = case((kev.c.cve_id.is_not(None), 0), else_=1)
+        with self._conn() as c:
+            total = int(c.execute(select(func.count()).select_from(total_query)).scalar_one())
+            rows = c.execute(stmt.order_by(priority, kev.c.date_added.desc(), cve.c.cvss_score.desc(),
+                                           cve.c.cve_id).offset(offset).limit(limit)).mappings().all()
+            return total, [dict(r) for r in rows]
+
+    def vulnerability_detail(self, cve_id: str) -> dict[str, Any] | None:
+        c, k, m, v, p, h = (S.vulnerability_cves, S.kev_entries, S.vulnerability_product_matches,
+                            S.vulnerability_match_versions, S.installed_packages, S.hosts)
+        with self._conn() as conn:
+            row = conn.execute(select(c).where(c.c.cve_id == cve_id)).mappings().first()
+            if row is None:
+                return None
+            data = dict(row)
+            for key in ("cvss_metrics", "references", "configurations"):
+                data[key] = json.loads(data[key] or ("{}" if key == "cvss_metrics" else "[]"))
+            kev = conn.execute(select(k).where(k.c.cve_id == cve_id)).mappings().first()
+            data["kev"] = dict(kev) if kev else None
+            maps = conn.execute(select(m).where(m.c.cve_id == cve_id).order_by(m.c.name, m.c.source)).mappings().all()
+            details = []
+            for mapping in maps:
+                item = dict(mapping)
+                versions = [r[0] for r in conn.execute(select(v.c.version).where(and_(v.c.cve_id == cve_id,
+                    v.c.source == item["source"], v.c.name == item["name"], v.c.arch == item["arch"])).order_by(v.c.version))]
+                item["affected_versions"] = versions
+                stmt = (select(p.c.host_id, h.c.hostname, p.c.source, p.c.name, p.c.arch, p.c.version,
+                               S.assets.c.id.label("asset_id"), S.assets.c.asset_no.label("asset_no"))
+                        .select_from(p.join(h, h.c.host_id == p.c.host_id).outerjoin(S.assets, S.assets.c.host_id == p.c.host_id))
+                        .where(and_(p.c.source == item["source"], p.c.name == item["name"], p.c.arch == item["arch"])))
+                if item["status"] == "affected_confirmed" and versions:
+                    stmt = stmt.where(p.c.version.in_(versions))
+                item["installations"] = [dict(r) for r in conn.execute(stmt.order_by(h.c.hostname, p.c.version)).mappings()]
+                details.append(item)
+            data["matches"] = details
+            data["feed_status"] = [dict(r) for r in conn.execute(select(S.vulnerability_feed_status).order_by(
+                S.vulnerability_feed_status.c.source)).mappings()]
+            return data
+
+    def update_vulnerability_match(self, cve_id: str, source: str, name: str, arch: str,
+                                   values: dict[str, Any], actor_id: str, at: str,
+                                   expected_revision: int | None) -> dict[str, Any]:
+        m, ev, v, cve, p = (S.vulnerability_product_matches, S.vulnerability_match_events,
+                            S.vulnerability_match_versions, S.vulnerability_cves, S.installed_packages)
+        with self.transaction(), self._conn(write=True) as conn:
+            if conn.execute(select(cve.c.cve_id).where(cve.c.cve_id == cve_id)).first() is None:
+                raise KeyError("CVE not found")
+            if conn.execute(select(p.c.host_id).where(and_(p.c.source == source, p.c.name == name,
+                    p.c.arch == arch)).limit(1)).first() is None:
+                raise KeyError("software product not found")
+            current = conn.execute(select(m).where(and_(m.c.cve_id == cve_id, m.c.source == source,
+                m.c.name == name, m.c.arch == arch))).mappings().first()
+            if current is None:
+                if expected_revision is not None:
+                    raise ConflictError("vulnerability match changed")
+                revision, old = 1, None
+                conn.execute(insert(m).values(cve_id=cve_id, source=source, name=name, arch=arch,
+                    **{k: value for k, value in values.items() if k != "affected_versions"},
+                    updated_by=actor_id, updated_at=at, revision=revision))
+            else:
+                if expected_revision is None or current["revision"] != expected_revision:
+                    raise ConflictError("vulnerability match changed")
+                revision, old = expected_revision + 1, current["status"]
+                result = conn.execute(update(m).where(and_(m.c.cve_id == cve_id, m.c.source == source,
+                    m.c.name == name, m.c.arch == arch, m.c.revision == expected_revision)).values(
+                    **{k: value for k, value in values.items() if k != "affected_versions"},
+                    updated_by=actor_id, updated_at=at, revision=revision))
+                if result.rowcount != 1:
+                    raise ConflictError("vulnerability match changed")
+            conn.execute(delete(v).where(and_(v.c.cve_id == cve_id, v.c.source == source,
+                v.c.name == name, v.c.arch == arch)))
+            versions = values.get("affected_versions", [])
+            if versions:
+                conn.execute(insert(v), [dict(cve_id=cve_id, source=source, name=name, arch=arch, version=version)
+                                         for version in versions])
+            conn.execute(insert(ev).values(cve_id=cve_id, source=source, name=name, arch=arch,
+                old_status=old, new_status=values["status"], evidence=values["evidence"],
+                changed_by=actor_id, changed_at=at))
+            return {"cve_id": cve_id, "source": source, "name": name, "arch": arch, **values,
+                    "updated_by": actor_id, "updated_at": at, "revision": revision}
+
+    def vulnerability_feed_status(self) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(select(S.vulnerability_feed_status).order_by(
+                S.vulnerability_feed_status.c.source)).mappings()]
+
+    def replace_cisa_kev(self, values: list[dict[str, Any]], catalog_version: str, fetched_at: str) -> None:
+        k, cve = S.kev_entries, S.vulnerability_cves
+        with self.transaction(), self._conn(write=True) as conn:
+            conn.execute(delete(k))
+            for value in values:
+                cid = value["cve_id"]
+                current = conn.execute(select(cve.c.cve_id).where(cve.c.cve_id == cid)).first()
+                if current:
+                    conn.execute(update(cve).where(cve.c.cve_id == cid).values(
+                        description=value["description"], modified_at=value.get("modified_at"),
+                        references=json.dumps(value.get("references", []), sort_keys=True)))
+                else:
+                    conn.execute(insert(cve).values(cve_id=cid, description=value["description"], published_at=None,
+                        modified_at=value.get("modified_at"), cvss_score=None, cvss_severity=None,
+                        cvss_metrics="{}", nvd_status="", references=json.dumps(value.get("references", []), sort_keys=True),
+                        configurations="[]", nvd_fetched_at=None))
+                conn.execute(insert(k).values(cve_id=cid, vendor=value["vendor"], product=value["product"],
+                    vulnerability_name=value["vulnerability_name"], date_added=value["date_added"], due_date=value["due_date"],
+                    ransomware_use=value["ransomware_use"], required_action=value["required_action"], notes=value["notes"],
+                    catalog_version=catalog_version, fetched_at=fetched_at))
+
+    def upsert_nvd_vulnerabilities(self, values: list[dict[str, Any]], fetched_at: str) -> None:
+        t = S.vulnerability_cves
+        with self.transaction(), self._conn(write=True) as conn:
+            for value in values:
+                data = {**value, "cvss_metrics": json.dumps(value["cvss_metrics"], sort_keys=True),
+                        "references": json.dumps(value["references"], sort_keys=True),
+                        "configurations": json.dumps(value["configurations"], sort_keys=True),
+                        "nvd_fetched_at": fetched_at}
+                if conn.execute(select(t.c.cve_id).where(t.c.cve_id == value["cve_id"])).first():
+                    conn.execute(update(t).where(t.c.cve_id == value["cve_id"]).values(**{k: v for k, v in data.items() if k != "cve_id"}))
+                else:
+                    conn.execute(insert(t).values(**data))
+
+    def record_vulnerability_feed(self, source: str, state: str, attempted_at: str, succeeded_at: str | None,
+                                  error: str, data_version: str, records: int) -> None:
+        t = S.vulnerability_feed_status
+        with self.transaction(), self._conn(write=True) as conn:
+            current = conn.execute(select(t).where(t.c.source == source)).mappings().first()
+            if current is None:
+                values = dict(source=source, state=state, last_success_at=succeeded_at,
+                    last_attempt_at=attempted_at, last_error=error, data_version=data_version, records=records)
+                conn.execute(insert(t).values(**values))
+            elif succeeded_at:
+                conn.execute(update(t).where(t.c.source == source).values(state=state,
+                    last_success_at=succeeded_at, last_attempt_at=attempted_at, last_error=error,
+                    data_version=data_version, records=records))
+            elif state == "partial":
+                conn.execute(update(t).where(t.c.source == source).values(state=state,
+                    last_attempt_at=attempted_at, last_error=error, data_version=data_version, records=records))
+            else:
+                # 실패 시 이전 성공 데이터와 버전은 보존한다.
+                conn.execute(update(t).where(t.c.source == source).values(state="failed",
+                    last_attempt_at=attempted_at, last_error=error))
 
 
     @contextmanager

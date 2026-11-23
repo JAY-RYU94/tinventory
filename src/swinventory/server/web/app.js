@@ -9,16 +9,21 @@
   const $role = document.getElementById("role");
   const TOKEN_KEY = "swinv.token";
   let token = sessionStorage.getItem(TOKEN_KEY) || "";
-  let role = ""; // /v1/whoami 결과: "admin" | "read" (로그인 뒤 한 번 확인해 화면 전체가 같은 값을 쓴다)
+  let role = ""; // /v1/whoami 결과: admin | request | read
+  let authKind = ""; // 승인 워크플로는 요청·관리자 개인 세션에 한한다
   let generation = 0; // 느린 응답이 나중 화면을 덮어쓰지 않게 한다
   let enrollTimer = null; // '서버 등록' 화면의 등록 대기 폴링(화면을 벗어나면 정리)
+  const expandedServers = new Set();
+  let groupPath = "";
+  const formDrafts = new Map(); // 비밀번호·발급된 JWT 는 넣지 않는다.
   let currentName = "overview"; // 지금 메뉴 이름 — 문서 제목과 표 정렬 기억의 범위
+  let assetDraftGuard = null;
 
   // 권한 부족(403)과 '관리자 전용 컨트롤을 끈 이유'는 이 문구 하나로 통일한다.
   const ADMIN_ONLY = "관리자 권한으로 로그인해야 합니다";
   const NET_DOWN = "서버에 연결할 수 없습니다(잠시 후 다시 시도).";
   const PAGE_ROWS = 200; // 표는 한 번에 이만큼만 그리고 '더 보기'로 늘린다
-  const SCREEN = { overview: "개요", kernels: "커널", software: "소프트웨어", hosts: "호스트", assets: "자산", containers: "컨테이너", network: "네트워크", events: "변경 이력", reports: "AI 리포트", enroll: "서버 등록", settings: "설정", accounts: "계정·권한" };
+  const SCREEN = { overview: "개요", kernels: "커널", software: "소프트웨어", hosts: "호스트", assets: "자산", containers: "컨테이너", network: "네트워크", events: "변경 이력", reports: "AI 리포트", enroll: "서버 등록", settings: "설정", accounts: "내 계정", users: "사용자 관리", tokens: "API 토큰", "business-apps": "업무용 앱", "sw-requests": "SW 사용 승인", cves: "취약점" };
 
   const EVENT_LABELS = {
     package_installed: ["설치", "ok"], package_removed: ["삭제", "err"],
@@ -224,6 +229,7 @@
 
   // ---------- 권한 ----------
   const isAdmin = () => role === "admin";
+  const isAdminSession = () => role === "admin" && authKind === "session";
   // 조회 전용 토큰이면 관리자 전용 컨트롤을 끈다 — 폼을 채우고 눌러 본 뒤에야 403 을 만나지 않게 이유를 툴팁으로 남긴다.
   function gate(...els) {
     if (!isAdmin()) for (const el of els) { el.disabled = true; el.title = ADMIN_ONLY; }
@@ -311,20 +317,23 @@
     return [input, err];
   }
 
-  const VIEWS = { accounts: viewAccounts, overview: viewOverview, kernels: viewKernels, software: viewSoftware, hosts: viewHosts, assets: viewAssets, containers: viewContainers, events: viewEvents, reports: viewReports, settings: viewSettings, network: viewNetwork, enroll: viewEnroll };
+  const VIEWS = { accounts: viewMyAccount, users: viewUsers, tokens: viewTokens, overview: viewOverview, kernels: viewKernels, software: viewSoftware, hosts: viewHosts, assets: viewAssets, containers: viewContainers, events: viewEvents, reports: viewReports, settings: viewSettings, network: viewNetwork, enroll: viewEnroll, "business-apps": viewBusinessSoftware, "sw-requests": viewSoftwareRequests, cves: viewVulnerabilities };
 
   const titled = (node, sub) => { node.dataset.title = sub; return node; }; // 상세 화면은 대상 이름을 문서 제목에 싣는다
   const documentTitle = (name, sub) => (sub ? `${sub} · ${SCREEN[name]} · swinventory` : `${SCREEN[name]} · swinventory`);
 
   function showRole() {
+    document.querySelectorAll("[data-admin]").forEach((el) => { el.hidden = !isAdmin(); });
+    document.querySelectorAll("[data-request]").forEach((el) => { el.hidden = role !== "admin" && !(role === "request" && authKind === "session"); });
     $role.hidden = false;
-    $role.textContent = isAdmin() ? "관리자" : "조회 전용";
-    $role.className = "badge " + (isAdmin() ? "ok" : "neutral");
-    $role.title = isAdmin() ? "관리자 권한으로 로그인했습니다" : `조회 권한으로 접속했습니다. 변경 기능은 ${ADMIN_ONLY}.`;
+    $role.textContent = isAdmin() ? "관리자" : role === "request" ? "요청자" : "조회 전용";
+    $role.className = "badge " + (isAdmin() ? "ok" : role === "request" ? "warn" : "neutral");
+    $role.title = isAdmin() ? "관리자 권한으로 로그인했습니다" : role === "request" ? "요청 범위에서 업무용 SW 사용 승인을 요청할 수 있습니다" : `조회 권한으로 접속했습니다. 변경 기능은 ${ADMIN_ONLY}.`;
   }
   async function loadRole() {
     try {
-      role = (await api("/v1/whoami")).role === "admin" ? "admin" : "read";
+      role = (await api("/v1/whoami")).role;
+      authKind = (await api("/v1/auth/me")).kind;
     } catch (err) {
       if (err.status === 401) return false; // request() 가 이미 로그인 화면으로 보냈다
       if (err.status === 403) { logout("이 토큰으로는 조회할 수 없습니다(수집 전용)."); return false; }
@@ -363,11 +372,23 @@
   }
 
   async function render() {
+    if (assetDraftGuard && location.hash !== assetDraftGuard.hash) {
+      if (assetDraftGuard.isDirty() && !confirm("저장하지 않은 자산 변경 내용이 있습니다. 이 화면을 떠날까요?")) {
+        location.hash = assetDraftGuard.hash;
+        return;
+      }
+      assetDraftGuard = null;
+    }
     if (!token) return renderLogin();
     const { segments, query } = parseHash();
     const name = VIEWS[segments[0]] ? segments[0] : "overview";
     if (name !== currentName) { sortMemory.clear(); currentName = name; }
     $top.hidden = false;
+    document.body.classList.add("signed-in");
+    setMenu(false);
+    const path = segments.join("/");
+    if (path !== groupPath) { expandedServers.clear(); groupPath = path; }
+    document.getElementById("my-account").setAttribute("aria-current", name === "accounts" ? "page" : "false");
     document.querySelectorAll("#nav a").forEach((a) => {
       const on = a.dataset.route === name;
       a.classList.toggle("active", on);
@@ -398,7 +419,10 @@
   }
 
   function logout(message) {
-    generation++; token = ""; role = ""; sessionStorage.removeItem(TOKEN_KEY);
+    if (!message && assetDraftGuard?.isDirty() && !confirm("저장하지 않은 자산 변경 내용이 있습니다. 로그아웃할까요?")) return;
+    assetDraftGuard = null;
+    generation++; token = ""; role = ""; authKind = ""; sessionStorage.removeItem(TOKEN_KEY);
+    formDrafts.clear(); expandedServers.clear(); groupPath = "";
     clearInterval(enrollTimer); renderLogin(message);
   }
   // 로그인 확인은 request() 를 쓰지 않는다(401 일 때 request 가 로그인 화면을 한 번 더 그리지 않게).
@@ -408,12 +432,16 @@
     let res;
     try { res = await fetch("/v1/whoami", { headers: { Authorization: `Bearer ${candidate}` } }); } catch (_) { throw new ApiError(0, NET_DOWN); }
     if (!res.ok) throw new ApiError(res.status, res.statusText);
-    return (await res.json()).role === "admin" ? "admin" : "read";
+    const identity = await res.json();
+    const principalRes = await fetch("/v1/auth/me", { headers: { Authorization: `Bearer ${candidate}` } });
+    if (!principalRes.ok) throw new ApiError(principalRes.status, principalRes.statusText);
+    return { role: identity.role, kind: (await principalRes.json()).kind };
   }
   const loginError = (err) => (err.status === 401 ? "토큰이 올바르지 않습니다." : err.status === 403 ? "이 토큰으로는 조회할 수 없습니다(수집 전용)." : NET_DOWN);
   function renderLogin(message) {
     lastPath = ""; // 로그인 화면은 어느 화면도 아니다 — 로그인 뒤에는 어느 화면이든 '새 화면'이다(제목으로 초점)
     $top.hidden = true; $role.hidden = true;
+    document.body.classList.remove("signed-in"); setMenu(false);
     document.title = "로그인 · swinventory";
     const input = h("input", { id: "login-token", type: "password", placeholder: "조회 토큰 또는 관리자 토큰", autocomplete: "off", required: true });
     const note = message ? h("div", { class: "error", role: "alert" }, message)
@@ -425,10 +453,10 @@
       if (!candidate) return;
       submit.disabled = true;
       try {
-        role = await probeRole(candidate);
+        const identity = await probeRole(candidate); role = identity.role; authKind = identity.kind;
         token = candidate; sessionStorage.setItem(TOKEN_KEY, token);
         if (location.hash) render(); else location.hash = "#/overview"; // 딥링크로 들어왔다면 원래 페이지로(해시가 바뀌면 hashchange 가 그린다)
-      } catch (err) { token = ""; role = ""; renderLogin(loginError(err)); }
+      } catch (err) { token = ""; role = ""; authKind = ""; renderLogin(loginError(err)); }
     } }, h("label", { for: "login-token", class: "muted" }, "토큰"), input, submit);
     const username = h("input", { id: "login-id", autocomplete: "username", required: true, maxlength: 64 });
     const password = h("input", { id: "login-password", type: "password", autocomplete: "current-password", required: true, maxlength: 128 });
@@ -442,7 +470,7 @@
         let result;
         try { result = await res.json(); } catch (_) { throw new Error(NET_DOWN); }
         if (!res.ok) throw new Error(typeof result.detail === "string" ? result.detail : "로그인에 실패했습니다.");
-        password.value = ""; token = result.access_token; role = "";
+        password.value = ""; token = result.access_token; role = ""; authKind = "";
         sessionStorage.setItem(TOKEN_KEY, token);
         if (location.hash) render(); else location.hash = "#/overview";
       } catch (err) { password.value = ""; accountMsg.err(err instanceof TypeError ? NET_DOWN : err.message || NET_DOWN); accountSubmit.disabled = false; }
@@ -461,27 +489,33 @@
     return h("div", null,
       h("h1", null, "개요"),
       o.host_count === 0 ? h("div", { class: "notice" }, "아직 등록된 서버가 없습니다. ", link("서버 등록", "#/enroll"), " 에서 설치 명령을 복사해 대상 서버에서 실행하세요.") : null,
-      h("div", { class: "cards" },
-        card("호스트", o.host_count, "수집 대상 서버", "", "#/hosts"),
-        card("수집 정상률", `${pct}%`, `${o.healthy_count} / ${o.host_count} 정상`, o.host_count && o.healthy_rate < 0.9 ? "warn" : "ok", "#/hosts"),
-        card("재부팅 필요", o.reboot_required_count, "새 커널이 설치됐지만 미적용", o.reboot_required_count ? "warn" : "ok", "#/kernels?reboot=1"),
-        card("수집 오류", o.error_count, "일부 수집기 실패", o.error_count ? "warn" : "", "#/hosts?status=error"),
-        card("수집 끊김", o.stale_count, `${o.stale_after_hours}시간 이상 무소식`, o.stale_count ? "err" : "", "#/hosts?status=stale"),
-        o.policy_active
-          ? card("커널 하한선 미달", o.noncompliant_count, "설정한 최소 커널보다 낮은 호스트", o.noncompliant_count ? "err" : "ok", "#/kernels?compliant=false")
-          : card("커널 하한선", "미설정", "설정 화면에서 최소 커널을 지정", "", "#/settings"),
-        card("IP 충돌", o.ip_conflict_count, "같은 IP 를 둘 이상의 호스트가 사용", o.ip_conflict_count ? "err" : "ok", "#/network?conflicts=1"),
-        card("쿠버네티스 노드", o.containers.node_count, `클러스터 ${o.containers.cluster_count}개`, "", "#/containers"),
-        card("실행 중 컨테이너", o.containers.running_container_count, `이미지 ${o.containers.image_count}종`, "", "#/containers/list?active=1"),
-        card("자산 미등록", o.assets.unregistered, "수집됐지만 자산 대장에 없는 호스트", o.assets.unregistered ? "warn" : "ok", "#/assets?status=unregistered"),
-        card("자산 미수집", o.assets.uncollected, "대장에만 있고 에이전트 수집이 없는 자산", o.assets.uncollected ? "err" : "ok", "#/assets?status=uncollected"),
-        card("주의 포트 노출", o.notable_exposed_host_count, "민감 서비스 포트를 외부 주소에 바인딩한 호스트", o.notable_exposed_host_count ? "warn" : "ok", "#/network/ports?notable=1")),
+      h("div", { class: "cards stat-strip" },
+        card("전체 서버", o.host_count, "", "", "#/hosts"),
+        card("수집 정상", `${pct}%`, `${o.healthy_count} / ${o.host_count}대`, "", "#/hosts?status=ok"),
+        card("실행 중 컨테이너", o.containers.running_container_count, "", "", "#/containers/list?active=1"),
+        card("클러스터", o.containers.cluster_count, `노드 ${o.containers.node_count}대`, "", "#/containers")),
+      h("h2", null, "우선 확인"),
+      table([
+        { title: "항목", render: (r) => r.label },
+        { title: "영향", render: (r) => r.detail },
+        { title: "건수", sort: (r) => r.count, desc: true, render: (r) => badge(String(r.count), r.level) },
+        { title: "확인", render: (r) => link("목록 보기", r.href) },
+      ], [
+        { label: "IP 충돌", count: o.ip_conflict_count, detail: "같은 IP를 사용하는 서버", level: "err", href: "#/network?conflicts=1" },
+        { label: "수집 끊김", count: o.stale_count, detail: `${o.stale_after_hours}시간 이상 수집되지 않음`, level: "err", href: "#/hosts?status=stale" },
+        { label: "수집 오류", count: o.error_count, detail: "일부 수집 항목 실패", level: "warn", href: "#/hosts?status=error" },
+        { label: "주의 포트", count: o.notable_exposed_host_count, detail: "민감 서비스의 외부 바인딩 확인 필요", level: "warn", href: "#/network/ports?notable=1" },
+        { label: "커널 하한선 미달", count: o.noncompliant_count, detail: "최소 커널 버전보다 낮음", level: "warn", href: "#/kernels?compliant=false" },
+        { label: "재부팅 필요", count: o.reboot_required_count, detail: "설치한 커널이 아직 적용되지 않음", level: "warn", href: "#/kernels?reboot=1" },
+        { label: "자산 미등록", count: o.assets.unregistered, detail: "자산 대장에 없는 서버", level: "", href: "#/assets?status=unregistered" },
+        { label: "자산 미수집", count: o.assets.uncollected, detail: "대장에 있지만 수집되지 않은 자산", level: "", href: "#/assets?status=uncollected" },
+      ].filter((r) => r.count > 0), "현재 조치가 필요한 항목이 없습니다."),
+      h("div", { class: "section-heading" }, h("h2", null, "최근 변경"), link("전체 변경 이력", "#/events")), eventsTable(o.recent_events.slice(0, 8)),
       h("h2", null, "실행 중 커널 분포"),
       h("div", { class: "panel" }, bars(o.kernel_distribution, {
         nameOf: (k) => k.version, countOf: (k) => k.host_count,
         onClick: (k) => { location.hash = `#/kernels?running=${enc(k.version)}`; } })),
-      h("h2", null, "최근 변경"),
-      eventsTable(o.recent_events));
+      );
   }
 
   function eventsTable(events, withAsset = true) {
@@ -568,13 +602,19 @@
     if (!rows.length) return empty("조건에 맞는 서버 데이터가 없습니다.");
     const groups = new Map();
     rows.forEach((r) => { if (!groups.has(r.host_id)) groups.set(r.host_id, []); groups.get(r.host_id).push(r); });
+    const names = new Map();
+    groups.forEach((items) => names.set(items[0].hostname, (names.get(items[0].hostname) || 0) + 1));
     return h("div", { class: "panel server-groups" }, [...groups].map(([id, items]) => {
       const body = h("div", { class: "server-group-body" });
       let loaded = !lazy;
       if (!lazy) body.append(render(items));
-      const details = h("details", { class: "server-group", "data-host-id": id },
-        h("summary", null, `서버: ${items[0].hostname || id} · ${label} ${countOf(items)}개`, h("span", { class: "muted server-id" }, id)), body);
+      const details = h("details", { class: "server-group", "data-host-id": id, open: expandedServers.has(id) },
+        h("summary", { title: `${items[0].hostname || id} · 서버 ID: ${id}` }, h("span", { class: "server-name" }, h("span", { class: "sr-only" }, "서버: "), items[0].hostname || id,
+          names.get(items[0].hostname) > 1 ? h("small", { class: "muted" }, ` (${id})`) : null),
+          h("span", { class: "server-count" }, `${label} ${countOf(items)}개`)), body);
       details.addEventListener("toggle", async () => {
+        if (!details.isConnected) return;
+        if (details.open) expandedServers.add(id); else expandedServers.delete(id);
         if (!details.open || loaded) return;
         loaded = true;
         clear(body).append(h("p", { role: "status" }, "불러오는 중…"));
@@ -649,7 +689,8 @@
       h("form", { class: "toolbar", onsubmit: (e) => { e.preventDefault(); apply({ below: belowIn.value.trim(), version: "" }); } },
         h("label", { for: "below-version" }, "이 버전 미만"), belowIn, h("button", { type: "submit" }, "적용"),
         chips),
-      h("h2", null, `설치 호스트 (${d.hosts.length})`),
+      h("h2", null, `설치 호스트 (${new Set(d.hosts.map((host) => host.host_id)).size})`),
+      h("p", { class: "muted" }, `설치 항목 ${d.hosts.length}행`),
       serverGroups(d.hosts, (items) => table([
         { title: "호스트", sort: (r) => r.hostname, render: (r) => link(r.hostname, `#/hosts/${enc(r.host_id)}`) },
         ...assetCols,
@@ -661,7 +702,7 @@
 
   // ---------- 호스트 ----------
   async function viewHosts(rest, q, alive) {
-    if (rest[0]) return hostDetail(rest.join("/"));
+    if (rest[0]) return hostDetail(rest.join("/"), q);
     const st = { status: q.get("status") || "", tag: normTags(q.get("tag")), q: q.get("q") || "" };
     const params = () => {
       const p = new URLSearchParams();
@@ -706,7 +747,9 @@
       body);
   }
 
-  async function hostDetail(hostId) {
+  async function hostDetail(hostId, q) {
+    const saved = q.get("saved") === "1";
+    if (saved) history.replaceState(null, "", `${location.pathname}${location.search}#/hosts/${enc(hostId)}`);
     const d = await api(`/v1/hosts/${enc(hostId)}`);
     const host = d.host;
     const errors = Object.entries(host.last_errors || {});
@@ -746,7 +789,7 @@
     drawPkgs();
 
     const k = d.kernel;
-    return titled(h("div", null,
+    return titled(h("div", null, saved ? h("p", { class: "notice", role: "status" }, "자산 정보를 저장했습니다.") : null,
       h("div", { class: "toolbar" }, link("← 호스트 목록", "#/hosts"), h("span", { class: "spacer" }), removeBtn),
       h("h1", null, host.hostname, " ", statusBadge(host)),
       errors.length ? h("div", { class: "notice" }, h("strong", null, "마지막 수집에서 실패한 수집기"), errors.map(([n, m]) => h("div", { class: "mono" }, `${n}: ${m}`))) : null,
@@ -845,8 +888,12 @@
 
   // ---------- 자산 ----------
   async function viewAssets(rest, q, alive) {
-    if (rest[0]) return assetForm(rest[0] === "new" ? null : rest[0], q);
+    if (rest[0] === "new") return assetForm(null, q);
+    if (rest[0] && rest[1] === "edit") return assetForm(rest[0], q);
+    if (rest[0]) return assetDetail(rest[0], q, alive);
     const st = { kind: q.get("kind") || "", status: q.get("status") || "", q: q.get("q") || "" };
+    const saved = q.get("saved") === "1";
+    if (saved) history.replaceState(null, "", `${location.pathname}${location.search}${hashOf("#/assets", st)}`);
     const params = () => {
       const p = new URLSearchParams();
       if (st.kind) p.set("kind", st.kind);
@@ -856,12 +903,13 @@
     };
     const [first, sum] = await Promise.all([api(`/v1/assets?${params()}`), api("/v1/assets/summary")]);
     const apply = (patch) => setQuery("#/assets", { ...st, ...patch });
-    const card = (label, value, sub, cls, patch) => h("a", { class: `card ${cls || ""}`, href: "#/assets", onclick: (e) => { e.preventDefault(); apply(patch); } },
+    const card = (label, value, sub, cls, patch) => h("a", { class: `card ${cls || ""}`, href: "#/assets", onclick: (e) => { e.preventDefault(); apply({ kind: "", q: "", ...patch }); } },
       h("div", { class: "label" }, label), h("div", { class: "value" }, value), h("div", { class: "sub" }, sub));
     const title = h("h1", null, "");
     const body = h("div");
     const rowAction = (r) => {
-      if (r.asset) return assetLink(`#/assets/${r.asset.id}`, isAdmin() ? "편집" : "보기");
+      if (r.asset) return h("span", { class: "row-actions" }, assetLink(`#/assets/${r.asset.id}`, "보기"),
+        isAdmin() ? assetLink(`#/assets/${r.asset.id}/edit`, "편집") : null);
       return isAdmin() ? assetLink(`#/assets/new?host=${enc(r.host_id)}`, "등록") : h("span", { class: "muted", title: ADMIN_ONLY, "aria-disabled": "true" }, "등록");
     };
     const draw = (rows) => {
@@ -890,19 +938,19 @@
     const sel = (label, name, options) => h("select", { "aria-label": label, onchange: (e) => apply({ [name]: e.target.value }) },
       options.map(([v, t]) => h("option", { value: v, selected: v === st[name] }, t)));
     const addBtn = gate(h("button", { class: "primary", type: "button", onclick: () => { location.hash = `#/assets/new?return=${enc(currentReturn())}`; } }, "자산 추가"));
-    return h("div", null, title,
+    return h("div", null, saved ? h("p", { class: "notice", role: "status" }, "자산 정보를 저장했습니다.") : null, title,
       h("div", { class: "cards" },
-        card("등록 자산", sum.assets, "자산 대장", "", { kind: "", status: "" }),
+        card("등록 자산", sum.assets, "자산 대장", "", { status: "registered" }),
         card("연결됨", sum.linked, "수집 호스트와 연결", "ok", { status: "linked" }),
         card("미수집", sum.uncollected, "대장에만 있고 에이전트 수집이 없음", sum.uncollected ? "err" : "ok", { status: "uncollected" }),
         card("자산 미등록", sum.unregistered, "수집됐지만 대장에 없음", sum.unregistered ? "warn" : "ok", { status: "unregistered" }),
         card("물리 / VM", `${sum.physical} / ${sum.virtual}`, "대장 값, 미등록은 감지 값", "", { status: "" })),
       (sum.kind_mismatch || sum.serial_mismatch || sum.ip_mismatch)
-        ? h("div", { class: "notice" }, `대장 값과 수집된 값이 다른 자산: 구분 ${sum.kind_mismatch}건 · 시리얼 ${sum.serial_mismatch}건 · IP ${sum.ip_mismatch}건 `, link("불일치 자산만 보기", "#/assets?status=mismatch")) : null,
+        ? h("div", { class: "notice" }, `대장 값과 수집된 값이 다른 자산: 구분 ${sum.kind_mismatch}건 · 시리얼 ${sum.serial_mismatch}건 · IP ${sum.ip_mismatch}건 `, link("현재 조건의 불일치 보기", hashOf("#/assets", { ...st, status: "mismatch" }))) : null,
       adminNote(),
       h("div", { class: "toolbar" },
         sel("구분 필터", "kind", [["", "모든 구분"], ["physical", "물리"], ["virtual", "VM"], ["container", "컨테이너"], ["unknown", "알 수 없음"]]),
-        sel("상태 필터", "status", [["", "모든 상태"], ["linked", "연결됨"], ["uncollected", "미수집"], ["unregistered", "자산 미등록"], ["mismatch", "불일치"]]),
+        sel("상태 필터", "status", [["", "모든 상태"], ["registered", "등록 자산"], ["linked", "연결됨"], ["uncollected", "미수집"], ["unregistered", "자산 미등록"], ["mismatch", "불일치"]]),
         search, h("span", { class: "spacer" }), csvButton(() => `/v1/assets?${withFormat(params())}`, "assets.csv"), addBtn),
       body,
       h("p", { class: "hint" }, "수집 호스트와의 연결은 시리얼 → 호스트명 → IP 순으로 자동 계산합니다(모호하면 연결하지 않음). 자동 연결이 안 되는 장비는 편집 화면에서 호스트를 직접 지정하세요."));
@@ -911,10 +959,13 @@
   // 라벨은 for/id 로 입력과 묶고(스크린리더·클릭 포커스), 힌트·오류는 aria-describedby 로 잇는다.
   function field(label, el, hint) {
     if (!el.id) el.id = uid("fld");
+    const labelId = uid("lbl");
+    const grouped = el.getAttribute("role") === "group";
+    if (grouped) el.setAttribute("aria-labelledby", labelId);
     const err = h("div", { class: "field-error", id: `${el.id}-err`, role: "alert" });
     el.setAttribute("aria-describedby", [hint ? `${el.id}-hint` : null, err.id].filter(Boolean).join(" "));
     el.fieldError = err;
-    return [h("label", { for: el.id }, label), h("div", null, el, err, hint ? h("div", { class: "hint", id: `${el.id}-hint` }, hint) : null)];
+    return [h("label", { id: labelId, for: grouped ? null : el.id }, label), h("div", null, el, err, hint ? h("div", { class: "hint", id: `${el.id}-hint` }, hint) : null)];
   }
   function setFieldError(el, text) {
     if (text) el.setAttribute("aria-invalid", "true"); else el.removeAttribute("aria-invalid");
@@ -958,11 +1009,106 @@
     return { node, update: () => rows.forEach((r) => r.update()) };
   }
 
+  async function assetDetail(id, q, alive) {
+    const detail = await api(`/v1/assets/${enc(id)}`);
+    let hostDetail = null, hostError = null;
+    if (detail.host_id) {
+      try { hostDetail = await api(`/v1/hosts/${enc(detail.host_id)}`); }
+      catch (err) { hostError = err; }
+    }
+    const tabKey = q.get("tab") || "overview";
+    const back = returnHash(q) || "#/assets";
+    const base = `#/assets/${enc(id)}`;
+    const saved = q.get("saved") === "1";
+    if (saved) history.replaceState(null, "", `${location.pathname}${location.search}${hashOf(base, { return: back, tab: tabKey })}`);
+    const tabLink = (label, key) => tab(label, hashOf(base, { return: back, tab: key } ), tabKey === key);
+    const editLink = isAdmin() ? h("a", { class: "button-link", href: hashOf(`${base}/edit`, { return: back, success: location.hash }) }, "자산 정보 편집") : null;
+    let content;
+    if (tabKey === "overview") {
+      content = h("dl", { class: "kv" },
+        h("dt", null, "자산번호"), h("dd", null, detail.asset.asset_no),
+        h("dt", null, "종류"), h("dd", null, kindLabel(detail.asset.kind)),
+        h("dt", null, "시리얼"), h("dd", null, detail.asset.serial || "-"),
+        h("dt", null, "호스트명 / 도메인"), h("dd", null, `${detail.asset.hostname || "-"} · ${detail.asset.domain || "-"}`),
+        h("dt", null, "대장 관리 IP"), h("dd", { class: "mono" }, detail.asset.ip || "-"),
+        h("dt", null, "비고"), h("dd", null, detail.asset.note || "-"),
+        h("dt", null, "상태 / 연결 근거"), h("dd", null, badge(ASSET_STATUS[detail.status]?.[0] || detail.status, ASSET_STATUS[detail.status]?.[1]), detail.match_by ? ` · ${MATCH_LABELS[detail.match_by]}` : ""),
+        h("dt", null, "수집 호스트"), h("dd", null, detail.host_id ? link(detail.hostname, `#/hosts/${enc(detail.host_id)}`) : h("span", { class: "muted" }, "호스트 미수집")),
+        h("dt", null, "상위 물리 자산"), h("dd", null, detail.parent_asset_no ? [assetLink(`#/assets/${detail.parent_asset_id}`, detail.parent_asset_no), ` · ${detail.parent_hostname || ""}`] : "없음"),
+        h("dt", null, "VM 자산"), h("dd", null, detail.vms.length ? detail.vms.map((v) => h("div", null, assetLink(`#/assets/${v.id}`, `${v.asset_no} · ${v.hostname || "호스트 미수집"}`))) : "없음"),
+        h("dt", null, "마지막 수집"), h("dd", null, hostDetail ? timeEl(hostDetail.host.last_seen) : "-"));
+      if (hostError) content.append(h("div", { class: "error", role: "alert" }, `호스트 세부 정보를 불러오지 못했습니다. 대장 정보는 표시했으며 호스트 조회 오류: ${hostError.message}`),
+        h("button", { type: "button", onclick: () => setQuery(base, { return: back, tab: tabKey, retry: Date.now() }) }, "호스트 정보 다시 시도"));
+      else if (hostDetail?.host.last_errors && Object.keys(hostDetail.host.last_errors).length) content.append(h("div", { class: "notice" },
+        h("strong", null, "마지막 수집의 항목 오류"), Object.entries(hostDetail.host.last_errors).map(([src, error]) => h("div", null, `${src}: ${error}`))));
+    } else if (!detail.host_id) {
+      content = h("div", { class: "notice" }, "수집 호스트가 연결되지 않아 설치 소프트웨어·취약점·네트워크·수집 이력을 조회할 수 없습니다. 자산 대장 정보는 계속 확인할 수 있습니다.");
+    } else if (hostError) {
+      content = h("div", { class: "error", role: "alert" }, `연결된 호스트 ${detail.hostname} 정보를 불러오지 못했습니다: ${hostError.message} `,
+        h("button", { type: "button", onclick: () => setQuery(base, { return: back, tab: tabKey, retry: Date.now() }) }, "다시 시도"));
+    } else if (tabKey === "software") {
+      const sourceRows = (hostDetail.source_freshness || []).filter((r) => r.source.startsWith("software."));
+      content = h("div", null, sourceRows.length ? h("section", { class: "panel" }, h("h2", null, "소프트웨어 수집 시점"),
+        table([
+          { title: "수집기", mono: true, render: (r) => r.source },
+          { title: "상태", render: (r) => badge(r.state === "ok" ? "성공" : "실패", r.state === "ok" ? "ok" : "err") },
+          { title: "마지막 성공", render: (r) => timeEl(r.last_success_at) },
+          { title: "마지막 시도 / 오류", render: (r) => [timeEl(r.last_attempt_at), r.last_error ? h("span", { class: "error-text" }, ` · ${r.last_error}`) : null] },
+        ], sourceRows)) : h("p", { class: "notice" }, "소프트웨어 수집기별 마지막 성공 시점은 아직 기록되지 않았습니다. 다음 정상 수집 이후 표시됩니다."),
+        h("h2", null, `설치 항목 ${hostDetail.packages.length}행`), table([
+        { title: "설치 소프트웨어", mono: true, sort: (p) => p.name, render: (p) => link(p.name, hashOf(`#/software/${enc(p.name)}`, { host: detail.host_id, version: p.version })) },
+        { title: "버전", mono: true, sort: (p) => p.version, render: (p) => p.version || "-" },
+        { title: "아키텍처", sort: (p) => p.arch, render: (p) => p.arch || "-" },
+        { title: "출처", sort: (p) => p.source, render: (p) => p.source },
+        { title: "취약점", render: (p) => link("확인된 영향", hashOf("#/cves", { host: detail.host_id, q: p.name })) },
+      ], hostDetail.packages, "마지막 성공 소프트웨어 수집에 설치 항목이 없습니다."));
+    } else if (tabKey === "cves") {
+      try {
+        const page = Math.max(1, Number(q.get("page") || 1));
+        const result = await api(`/v1/vulnerabilities?host=${enc(detail.host_id)}&page=${page}&page_size=50`);
+        content = h("div", null, h("p", { class: "muted", role: "status" }, `이 호스트의 CVE 매핑 ${result.total}건`), table([
+          { title: "KEV", render: (r) => r.vendor ? badge("CISA KEV", "err") : "-" },
+          { title: "CVE", render: (r) => link(r.cve_id, hashOf(`#/cves/${enc(r.cve_id)}`, { return: location.hash })) },
+          { title: "제품", render: (r) => r.vendor ? `${r.vendor} · ${r.product}` : r.description },
+          { title: "영향 판정", render: (r) => impactBadge(r.impact_status) },
+          { title: "영향 호스트 / 설치", render: (r) => `${r.host_count || 0}대 · ${r.install_count || 0}개 설치` },
+        ], result.items, "이 호스트에 설치된 제품의 확인된 CVE 매핑이 없습니다. 미평가를 영향 없음으로 취급하지 않습니다."),
+        pageControls(base, { return: back, tab: tabKey, page }, page, 50, result.total));
+      } catch (err) { content = h("div", { class: "error", role: "alert" }, `취약점 조회 실패: ${err.message}`); }
+    } else if (tabKey === "network") {
+      content = h("div", null, h("p", null, link("호스트 상세에서 모든 네트워크 정보 보기 →", `#/hosts/${enc(detail.host_id)}`)),
+        h("h2", null, `네트워크 인터페이스 (${hostDetail.interfaces.length})`), hostDetail.interfaces.length ? table([
+          { title: "인터페이스", mono: true, render: (r) => r.name }, { title: "MAC", mono: true, render: (r) => r.mac || "-" },
+          { title: "상태", render: (r) => r.state }, { title: "주소", mono: true, render: (r) => r.addresses.join(", ") || "전역 주소 없음" },
+        ], hostDetail.interfaces) : empty("수집된 네트워크 인터페이스가 없습니다."),
+        h("h2", null, `열린 포트 (${hostDetail.ports.length})`), hostDetail.ports.length ? table([
+          { title: "프로토콜 / 포트", sort: (r) => r.port, render: (r) => `${r.proto}/${r.port}` },
+          { title: "바인딩", mono: true, render: (r) => r.bind }, { title: "노출", render: (r) => exposureBadge(r.exposure) },
+        ], hostDetail.ports) : empty("수집된 열린 포트가 없습니다."));
+    } else if (tabKey === "history") {
+      try {
+        const page = Math.max(1, Number(q.get("page") || 1));
+        const result = await api(`/v1/events?host=${enc(detail.host_id)}&page=${page}&page_size=100`);
+        content = h("div", null, h("p", { class: "muted", role: "status" }, `전체 ${result.total}건 · ${result.items.length}건 표시`), table([
+          { title: "시각", sort: (r) => r.occurred_at, render: (r) => timeEl(r.occurred_at) },
+          { title: "변경", render: (r) => eventBadge(r.event_type) }, { title: "대상", render: (r) => r.subject_key },
+          { title: "이전 / 이후", render: (r) => `${r.old_value || "-"} → ${r.new_value || "-"}` },
+        ], result.items, "이 호스트의 변경 이력이 없습니다."),
+        pageControls(base, { return: back, tab: tabKey, page }, page, 100, result.total));
+      } catch (err) { content = h("div", { class: "error", role: "alert" }, `이력 조회 실패: ${err.message}`); }
+    } else content = empty("알 수 없는 자산 상세 탭입니다.");
+    return titled(h("div", null, saved ? h("p", { class: "notice", role: "status" }, "자산 정보를 저장했습니다.") : null,
+      pageHeader(`자산 ${detail.asset.asset_no}`, editLink, `자산 상세 · revision ${detail.asset.revision}`),
+      h("nav", { class: "toolbar asset-tabs", "aria-label": "자산 상세 보기" },
+        tabLink("기본 정보", "overview"), tabLink("설치 소프트웨어", "software"), tabLink("취약점", "cves"), tabLink("네트워크", "network"), tabLink("변경 이력", "history")),
+      h("section", { class: "panel" }, content)), `자산 ${detail.asset.asset_no}`);
+  }
+
   async function assetForm(idOrNull, q) {
     const id = idOrNull;
     const back = returnHash(q) || "#/assets";
     const [physical, hosts] = await Promise.all([api("/v1/assets?kind=physical"), api("/v1/hosts")]);
-    let row = null; let prefill = {}; let kindUnclear = false;
+    let row = null; let prefill = {}; let kindUnclear = false; let hostError = null;
     if (id) row = await api(`/v1/assets/${enc(id)}`);
     else if (q.get("host")) {   // 호스트 화면에서 '자산으로 등록' — 수집된 값으로 미리 채운다
       const d = await api(`/v1/hosts/${enc(q.get("host"))}`);
@@ -973,6 +1119,7 @@
       prefill = { kind: kindUnclear ? "" : hw.kind, serial: hw.serial || "", hostname: d.host.hostname, domain: hw.domain || "", ip: v4, host_id: d.host.host_id };
     }
     const a = row ? row.asset : { asset_no: "", kind: "", serial: "", hostname: "", domain: "", ip: "", parent_asset_id: null, host_id: null, note: "", ...prefill };
+    let expectedRevision = row?.asset.revision ?? null;
     const f = {
       asset_no: h("input", { type: "text", value: a.asset_no, maxlength: 64, required: true, "aria-required": "true" }),
       kind: h("select", { required: true, "aria-required": "true" }, h("option", { value: "", disabled: true, selected: !a.kind }, "선택하세요"),
@@ -990,7 +1137,7 @@
     f.asset_no.id = "asset-no"; f.kind.id = "asset-kind";
     if (!isAdmin()) Object.values(f).forEach((el) => { el.disabled = true; el.title = ADMIN_ONLY; }); // 조회 전용: 채워도 저장할 수 없으니 입력 자체를 막는다
     const msg = msgBox();
-    const syncParent = () => { f.parent.disabled = !isAdmin() || f.kind.value !== "virtual"; if (f.parent.disabled) f.parent.value = ""; };
+    const syncParent = () => { f.parent.disabled = !isAdmin() || f.kind.value !== "virtual"; if (f.kind.value !== "virtual") f.parent.value = ""; };
     f.kind.addEventListener("change", syncParent); syncParent();
     f.asset_no.addEventListener("input", () => setFieldError(f.asset_no, ""));
     f.kind.addEventListener("change", () => setFieldError(f.kind, ""));
@@ -998,6 +1145,21 @@
       asset_no: f.asset_no.value.trim(), kind: f.kind.value, serial: f.serial.value.trim(), hostname: f.hostname.value.trim(), domain: f.domain.value.trim(),
       ip: f.ip.value.trim(), parent_asset_id: f.parent.value ? Number(f.parent.value) : null, host_id: f.host.value || null, note: f.note.value.trim(),
     });
+    const inputs = { asset_no: f.asset_no, kind: f.kind, serial: f.serial, hostname: f.hostname, domain: f.domain, ip: f.ip,
+      parent_asset_id: f.parent, host_id: f.host, note: f.note };
+    const readValues = (asset) => ({ asset_no: asset.asset_no || "", kind: asset.kind || "", serial: asset.serial || "", hostname: asset.hostname || "",
+      domain: asset.domain || "", ip: asset.ip || "", parent_asset_id: asset.parent_asset_id ?? null, host_id: asset.host_id || null, note: asset.note || "" });
+    let baselineValues = body();
+    let draftBaseline = JSON.stringify(baselineValues);
+    assetDraftGuard = { hash: location.hash, isDirty: () => JSON.stringify(body()) !== draftBaseline };
+    const updateBaseline = (values) => { baselineValues = readValues(values); draftBaseline = JSON.stringify(baselineValues); };
+    const applyValues = (values) => {
+      for (const [key, el] of Object.entries(inputs)) el.value = values[key] ?? "";
+      f.kind.dispatchEvent(new Event("change", { bubbles: true }));
+      f.parent.value = values.parent_asset_id == null ? "" : String(values.parent_asset_id);
+      f.host.value = values.host_id || "";
+      for (const el of Object.values(inputs)) if (el.fieldError) setFieldError(el, "");
+    };
     // 제출 전에 필수 항목을 그 자리에서 알려 준다(서버 422 를 받고서야 아는 일이 없게)
     const validate = () => {
       let first = null;
@@ -1009,13 +1171,82 @@
     };
     let busy = false; // 저장 중 다시 눌러 같은 자산이 두 번 만들어지지 않게
     const saveBtn = gate(h("button", { class: "primary", type: "submit" }, "저장"));
+    const showConflict = async () => {
+      let latest;
+      try { latest = await api(`/v1/assets/${enc(id)}`); }
+      catch (err) { msg.err(`최신 자산을 불러오지 못했습니다: ${err.message}`); return; }
+      const latestValues = readValues(latest.asset);
+      const openedValues = { ...baselineValues };
+      const currentValues = body();
+      const labels = { asset_no: "자산번호", kind: "구분", serial: "시리얼", hostname: "호스트명", domain: "도메인", ip: "IP",
+        parent_asset_id: "상위 자산", host_id: "수집 호스트", note: "비고" };
+      const rows = Object.keys(inputs).map((key) => {
+        const localChanged = currentValues[key] !== openedValues[key];
+        const remoteChanged = latestValues[key] !== openedValues[key];
+        const collision = localChanged && remoteChanged && currentValues[key] !== latestValues[key];
+        const choice = collision ? h("select", { "aria-label": `${labels[key]} 충돌 해결` },
+          h("option", { value: "latest" }, "최신값 사용"), h("option", { value: "mine" }, "내 입력 유지")) : null;
+        if (choice) choice.dataset.assetField = key;
+        const printable = (value) => value === null || value === "" ? "-" : String(value);
+        return h("tr", null, h("th", { scope: "row" }, labels[key]), h("td", null, printable(openedValues[key])),
+          h("td", null, printable(latestValues[key])), h("td", null, printable(currentValues[key])),
+          h("td", null, choice || (remoteChanged ? "최신값 유지" : localChanged ? "내 입력 유지" : "변경 없음")));
+      });
+      const compare = h("div", { class: "scroll" }, h("table", null,
+        h("thead", null, h("tr", null, ["항목", "열었을 때", "최신값", "내 입력", "저장할 값"].map((label) => h("th", { scope: "col" }, label)))),
+        h("tbody", null, rows)));
+      let dialog;
+      const useLatest = h("button", { type: "button", onclick: () => {
+        applyValues(latestValues); expectedRevision = latest.asset.revision; updateBaseline(latestValues);
+        dialog.close("latest"); msg.info("최신값을 불러왔습니다. 필요한 변경을 다시 적용하세요.");
+      } }, "최신값 불러오기");
+      const merge = h("button", { type: "button", class: "primary", onclick: async () => {
+        const merged = { ...latestValues };
+        for (const key of Object.keys(inputs)) {
+          const localChanged = currentValues[key] !== openedValues[key];
+          const remoteChanged = latestValues[key] !== openedValues[key];
+          if (localChanged && !remoteChanged) merged[key] = currentValues[key];
+          else if (localChanged && remoteChanged && currentValues[key] !== latestValues[key]) {
+            const select = [...dialog.querySelectorAll("select[data-asset-field]")].find((el) => el.dataset.assetField === key);
+            if (!select) { alert(`${labels[key]} 변경 충돌을 선택하세요.`); return; }
+            if (select.value === "mine") merged[key] = currentValues[key];
+          }
+        }
+        applyValues(merged); expectedRevision = latest.asset.revision; updateBaseline(latestValues);
+        dialog.close("merged"); await save();
+      } }, "선택한 값으로 저장");
+      dialog = editorDialog("자산이 다른 사용자에 의해 변경됨", h("div", null,
+        h("p", { class: "notice" }, "서로 다른 항목에서 생긴 변경은 함께 보존합니다. 같은 항목을 둘 다 바꿨으면 저장할 값을 선택하세요."),
+        compare, h("div", { class: "toolbar" }, useLatest, merge, cancelDialog(() => dialog.close("cancel")))), saveBtn);
+    };
+    const showApiErrors = (err) => {
+      const parts = err.message.split(/;\s*(?=[a-z_]+:\s)/i);
+      const first = [];
+      for (const part of parts) {
+        const match = part.match(/^(asset_no|kind|serial|hostname|domain|ip|parent_asset_id|host_id|note):\s*(.+)$/i);
+        if (!match) continue;
+        const el = inputs[match[1]];
+        if (!el) continue;
+        setFieldError(el, match[2]); first.push(el);
+      }
+      if (first.length) first[0].focus(); else msg.err(errMsg(err));
+    };
     const save = async () => {
       if (busy || !isAdmin() || !validate()) return;
       busy = true; saveBtn.disabled = true; msg.info("저장 중…");
       try {
-        await api(id ? `/v1/assets/${enc(id)}` : "/v1/assets", { method: id ? "PUT" : "POST", body: JSON.stringify(body()) });
-        location.hash = back; // 저장 뒤에는 온 화면으로 돌아간다
-      } catch (err) { msg.err(errMsg(err)); busy = false; saveBtn.disabled = false; }
+        await api(id ? `/v1/assets/${enc(id)}` : "/v1/assets", { method: id ? "PUT" : "POST", body: JSON.stringify({ ...body(), ...(id ? { expected_revision: expectedRevision } : {}) }) });
+        assetDraftGuard = null;
+        const requestedSuccess = q.get("success");
+        const successTarget = requestedSuccess && /^#\//.test(requestedSuccess) ? requestedSuccess : back;
+        const params = new URLSearchParams(successTarget.includes("?") ? successTarget.slice(successTarget.indexOf("?") + 1) : ""); params.set("saved", "1");
+        location.hash = `${successTarget.split("?")[0]}?${params}`;
+      } catch (err) {
+        busy = false; saveBtn.disabled = false;
+        msg.clear();
+        if (id && err.status === 409 && /다른 사용자|revision changed/i.test(err.message)) { await showConflict(); return; }
+        showApiErrors(err);
+      }
     };
     const removeBtn = id ? gate(h("button", { class: "danger", type: "button", onclick: async () => {
       if (!confirm(`자산 '${a.asset_no}' 을(를) 대장에서 삭제합니다. 수집된 호스트와 이력은 그대로 남습니다. 계속할까요?`)) return;
@@ -1023,7 +1254,7 @@
     } }, "삭제")) : null;
 
     let hostD = null;
-    if (row && row.host_id) { try { hostD = await api(`/v1/hosts/${enc(row.host_id)}`); } catch (_) { /* 연결 정보는 부가 */ } }
+    if (row && row.host_id) { try { hostD = await api(`/v1/hosts/${enc(row.host_id)}`); } catch (err) { hostError = err; } }
     const detected = hostD ? hostD.hardware : null;
     let compare = null;
     if (hostD) {
@@ -1051,6 +1282,10 @@
       field("상위 호스트", f.parent, "VM 이 올라간 물리 장비(구분이 VM 일 때만)."),
       field("수집 호스트 지정", f.host, "자동 연결이 안 될 때만 직접 지정합니다."), field("비고", f.note),
       h("div", { class: "full toolbar" }, saveBtn, removeBtn, msg.el));
+    for (const el of Object.values(inputs)) {
+      el.addEventListener("input", () => { if (el.fieldError) setFieldError(el, ""); });
+      el.addEventListener("change", () => { if (el.fieldError) setFieldError(el, ""); });
+    }
     return titled(h("div", null,
       h("div", { class: "toolbar" }, link(returnHash(q) ? "← 돌아가기" : "← 자산 목록", back)),
       h("h1", null, id ? `자산 ${a.asset_no}` : "자산 추가"),
@@ -1060,6 +1295,7 @@
         h("dt", null, "상태"), h("dd", null, [badge(...ASSET_STATUS[row.status]), flagBadges(row.flags)]),
         h("dt", null, "수집 호스트"), h("dd", null, row.host_id ? [link(row.hostname, `#/hosts/${enc(row.host_id)}`), ` · 연결 근거: ${MATCH_LABELS[row.match_by]}`] : h("span", { class: "muted" }, "아직 연결된 수집 호스트가 없습니다")),
         detected ? [h("dt", null, "수집된 장비"), h("dd", null, `${kindLabel(detected.kind)}${detected.virt ? ` (${detected.virt})` : ""} · ${detected.vendor} ${detected.model} · 시리얼 ${detected.serial || "읽지 못함"}`)] : null,
+        hostError ? h("div", { class: "error full", role: "alert" }, `연결된 호스트의 비교 정보를 불러오지 못했습니다: ${hostError.message}. 자산 대장 입력과 저장은 계속할 수 있습니다.`) : null,
         row.vms && row.vms.length ? [h("dt", null, "올라간 VM"), h("dd", null, row.vms.map((v) => h("div", null, link(v.asset_no, `#/assets/${v.id}`), ` ${v.hostname || ""}`)))] : null)) : null,
       compare ? [h("h2", null, "대장 값 ↔ 수집 값"), compare.node, h("p", { class: "hint" }, "'수집값 적용'은 아래 입력란만 바꿉니다. 저장을 눌러야 대장에 반영됩니다.")] : null,
       h("h2", null, "대장 정보"),
@@ -1237,16 +1473,25 @@
 
   // ---------- 변경 이력 ----------
   async function viewEvents(_, q) {
-    const st = { type: q.get("type") || "", host: q.get("host") || "", since: q.get("since") || "", limit: q.get("limit") || "" };
+    const st = { type: q.get("type") || "", host: q.get("host") || "", since: q.get("since") || "",
+      page: Math.max(1, Number(q.get("page") || 1)), page_size: q.get("page_size") || q.get("limit") || "200" };
+    if (!["50", "100", "200"].includes(st.page_size)) st.page_size = "200";
     const params = () => {
-      const p = new URLSearchParams({ limit: st.limit || "200" });
+      const p = new URLSearchParams({ page: String(st.page), page_size: st.page_size });
       if (st.type) p.set("type", st.type);
       if (st.host) p.set("host", st.host);
       if (st.since) p.set("since", localMidnightUtc(st.since));
       return p;
     };
-    const [events, hosts] = await Promise.all([api(`/v1/events?${params()}`), api("/v1/hosts").catch(() => [])]);
-    const apply = (patch) => setQuery("#/events", { ...st, ...patch });
+    const csvParams = () => {
+      const p = new URLSearchParams();
+      if (st.type) p.set("type", st.type);
+      if (st.host) p.set("host", st.host);
+      if (st.since) p.set("since", localMidnightUtc(st.since));
+      return p;
+    };
+    const [result, hosts] = await Promise.all([api(`/v1/events?${params()}`), api("/v1/hosts").catch(() => [])]);
+    const apply = (patch) => setQuery("#/events", { ...st, ...patch, page: patch.page ?? 1 });
     // host_id 대신 호스트 이름으로 고른다(이름이 겹치면 host_id 앞 8자를 덧붙인다). 주소에는 host_id 가 그대로 남는다.
     const count = new Map(); hosts.forEach((x) => count.set(x.hostname, (count.get(x.hostname) || 0) + 1));
     const labelOf = new Map(hosts.map((x) => [x.host_id, count.get(x.hostname) > 1 ? `${x.hostname} (${x.host_id.slice(0, 8)})` : x.hostname]));
@@ -1264,12 +1509,13 @@
     const typeSel = h("select", { "aria-label": "이벤트 유형", onchange: (e) => apply({ type: e.target.value }) }, h("option", { value: "" }, "모든 유형"),
       Object.entries(EVENT_LABELS).map(([k, [t]]) => h("option", { value: k, selected: k === st.type }, t)));
     const sinceIn = h("input", { type: "date", value: st.since, onchange: (e) => apply({ since: e.target.value }) });
-    const limitSel = h("select", { "aria-label": "표시 건수", onchange: (e) => apply({ limit: e.target.value }) },
-      ["100", "200", "500", "1000"].map((n) => h("option", { value: n, selected: n === (st.limit || "200") }, `${n}건`)));
+    const limitSel = h("select", { "aria-label": "페이지 크기", onchange: (e) => apply({ page_size: e.target.value }) },
+      ["50", "100", "200"].map((n) => h("option", { value: n, selected: n === st.page_size }, `${n}건`)));
     return h("div", null, h("h1", null, "변경 이력"),
       h("div", { class: "toolbar" }, typeSel, hostIn, h("datalist", { id: listId }, [...idOf.keys()].map((label) => h("option", { value: label }))), hostErr,
-        h("label", null, "이후", sinceIn), limitSel, h("span", { class: "spacer" }), csvButton(() => `/v1/events?${withFormat(params())}`, "events.csv")),
-      eventsTable(events));
+        h("label", null, "이후", sinceIn), limitSel, h("span", { class: "spacer" }), csvButton(() => `/v1/events?${withFormat(csvParams())}`, "events.csv")),
+      h("p", { class: "muted", role: "status" }, `전체 ${result.total}건 · ${result.items.length}건 표시`), eventsTable(result.items),
+      pageControls("#/events", st, st.page, Number(st.page_size), result.total));
   }
 
 
@@ -1586,96 +1832,647 @@
       h("pre", { class: "json", tabindex: "0" }, JSON.stringify(f, null, 2))), "근거 집계");
   }
 
-  // ---------- 계정·권한·JWT ----------
-  async function viewAccounts() {
+  // ---------- 계정·권한·API 토큰 ----------
+  const roleLabel = (r) => ({ read: "조회", request: "요청자", admin: "관리자", ingest: "수집 전용" })[r] || r;
+  function pageHeader(title, action, hint) {
+    return h("div", { class: "page-heading" }, h("div", null, h("h1", null, title), hint ? h("p", { class: "muted" }, hint) : null), action);
+  }
+  function feedback() {
+    const message = h("span"); let timer;
+    const node = h("div", { class: "feedback", role: "status", hidden: true }, message,
+      h("button", { type: "button", "aria-label": "알림 닫기", onclick: () => { node.hidden = true; } }, "닫기"));
+    return { node, ok(text) { message.textContent = text; node.hidden = false; clearTimeout(timer); timer = setTimeout(() => { node.hidden = true; }, 8000); } };
+  }
+  function editorDialog(title, body, opener, onCancel) {
+    const titleId = uid("dialog-title");
+    const dialog = h("dialog", { class: "editor-dialog", "aria-labelledby": titleId }, h("h2", { id: titleId }, title), body);
+    dialog.addEventListener("close", () => {
+      if (dialog.returnValue !== "saved" && onCancel) onCancel();
+      dialog.remove();
+      if (opener && opener.isConnected) opener.focus(); else focusTitle();
+    });
+    $app.append(dialog); dialog.showModal();
+    return dialog;
+  }
+  const cancelDialog = (close) => h("button", { type: "button", onclick: close }, "취소");
+  const userRoleSelect = (value = "read") => h("select", null,
+    ["read", "request", "admin"].map((r) => h("option", { value: r, selected: value === r }, roleLabel(r))));
+
+  async function viewMyAccount() {
     const me = await api("/v1/auth/me");
+    if (me.kind !== "session") return h("div", null, pageHeader("내 계정"),
+      h("div", { class: "panel" }, "토큰으로 접속했습니다. 비밀번호 변경은 ID·비밀번호로 로그인한 계정에서 사용할 수 있습니다."));
     const msg = msgBox();
     const current = h("input", { type: "password", autocomplete: "current-password", required: true, maxlength: 128 });
     const next = h("input", { type: "password", autocomplete: "new-password", required: true, minlength: 12, maxlength: 128 });
     const change = h("button", { type: "submit", class: "primary" }, "비밀번호 변경");
-    const personal = h("form", { class: "panel form", onsubmit: async (e) => {
+    const form = h("form", { class: "panel form personal-form", onsubmit: async (e) => {
       e.preventDefault(); change.disabled = true;
       try { await api("/v1/auth/password", { method: "POST", body: JSON.stringify({ current_password: current.value, new_password: next.value }) });
         current.value = ""; next.value = ""; logout("비밀번호를 변경했습니다. 새 비밀번호로 로그인하세요.");
       } catch (err) { current.value = ""; msg.err(errMsg(err)); change.disabled = false; }
-    } }, field("현재 비밀번호", current), field("새 비밀번호", next, "12~128자"), change, msg.el);
-    const page = h("div", null, h("h1", null, "계정·권한"), h("h2", null, "내 비밀번호 변경"),
-      h("p", { class: "hint" }, me.username ? `로그인 계정: ${me.username}. 비밀번호 변경 후 모든 로그인과 사용자 API 토큰이 해제됩니다.` : "토큰으로 접속했습니다."),
-      me.kind === "session" ? personal : h("p", { class: "panel notice" }, "본인 비밀번호를 변경하려면 ID·비밀번호로 로그인하세요."));
-    if (!isAdmin()) return page;
-    const [users, tokens] = await Promise.all([api("/v1/users"), api("/v1/tokens")]);
-    const managementMsg = msgBox();
-    const editor = h("div");
-    const roleSelect = (value = "read", ingest = false) => h("select", null,
-      [["read", "조회"], ["admin", "관리자"], ...(ingest ? [["ingest", "수집 전용"]] : [])].map(([v, label]) => h("option", { value: v, selected: v === value }, label)));
-    const edit = (user) => {
-      const selectedRole = roleSelect(user.role);
-      const active = h("input", { type: "checkbox", checked: user.active });
+    } }, field("현재 비밀번호", current), field("새 비밀번호", next, "12~128자"),
+      h("div", { class: "full form-actions" }, change, msg.el));
+    return h("div", null, pageHeader("내 계정", null, me.username), h("h2", null, "내 비밀번호 변경"),
+      h("p", { class: "hint section-hint" }, "변경하면 이 계정의 기존 로그인과 API 토큰이 해제됩니다."), form);
+  }
+
+  async function viewUsers(_, q, alive) {
+    if (!isAdmin()) return h("div", null, pageHeader("사용자 관리"), h("div", { class: "panel" }, ADMIN_ONLY));
+    let users = await api("/v1/users");
+    const notice = feedback(); const body = h("div");
+    const search = h("input", { type: "search", "aria-label": "사용자 검색", placeholder: "ID 검색", value: q.get("q") || "" });
+    const draw = () => {
+      const term = search.value.trim().toLowerCase();
+      clear(body).append(table([
+        { title: "ID", sort: (u) => u.username, render: (u) => u.username },
+        { title: "권한", render: (u) => roleLabel(u.role) },
+        { title: "상태", render: (u) => u.active ? badge("활성", "ok") : badge("비활성") },
+        { title: "작업", render: (u) => h("span", { class: "row-actions" },
+          h("button", { type: "button", onclick: (e) => edit(u, e.currentTarget) }, "권한·계정 변경"),
+          u.role === "request" && isAdminSession() ? h("button", { type: "button", onclick: (e) => manageScope(u, e.currentTarget) }, "요청 호스트 범위") : null) },
+      ], users.filter((u) => !term || u.username.toLowerCase().includes(term)), "일치하는 사용자가 없습니다."));
+    };
+    const refresh = async () => { const rows = await api("/v1/users"); if (alive()) { users = rows; draw(); } };
+    function edit(user, opener) {
+      const key = `user:${user.id}`; const draft = formDrafts.get(key) || { role: user.role, active: user.active };
+      const selectedRole = userRoleSelect(draft.role);
+      const active = h("input", { type: "checkbox", checked: draft.active });
       const reset = h("input", { type: "password", autocomplete: "new-password", minlength: 12, maxlength: 128 });
-      const save = h("button", { type: "submit", class: "primary" }, "변경 적용");
-      const editMsg = msgBox();
-      const form = h("form", { class: "panel form", onsubmit: async (e) => {
-        e.preventDefault(); save.disabled = true;
+      const msg = msgBox(); let dialog;
+      const save = h("button", { type: "submit", class: "primary", disabled: true }, "변경 적용");
+      const changed = () => {
+        formDrafts.set(key, { role: selectedRole.value, active: active.checked });
+        save.disabled = selectedRole.value === user.role && active.checked === user.active && !reset.value;
+      };
+      [selectedRole, active].forEach((el) => el.addEventListener("change", changed)); reset.addEventListener("input", changed);
+      const form = h("form", { class: "form", onsubmit: async (e) => {
+        e.preventDefault(); if (save.disabled) return; save.disabled = true;
         const patch = {};
         if (selectedRole.value !== user.role) patch.role = selectedRole.value;
         if (active.checked !== user.active) patch.active = active.checked;
         if (reset.value) patch.password = reset.value;
-        try { await api(`/v1/users/${enc(user.id)}`, { method: "PATCH", body: JSON.stringify(patch) }); reset.value = ""; await render(); }
-        catch (err) { reset.value = ""; editMsg.err(errMsg(err)); save.disabled = false; }
-      } }, h("h3", null, `${user.username} 계정 변경`), field("사용자 권한", selectedRole), field("계정 활성", active),
-        field("비밀번호 초기화", reset, "비워 두면 유지합니다. 변경하면 기존 JWT가 해제됩니다."), save, editMsg.el);
-      clear(editor).append(form); selectedRole.focus();
+        try {
+          await api(`/v1/users/${enc(user.id)}`, { method: "PATCH", body: JSON.stringify(patch) }); reset.value = ""; formDrafts.delete(key);
+          await refresh(); if (alive()) { dialog.close("saved"); notice.ok(`${user.username} 계정을 변경했습니다.`); }
+        } catch (err) { reset.value = ""; msg.err(errMsg(err)); changed(); }
+      } }, field("사용자 권한", selectedRole), field("계정 활성", active), field("비밀번호 초기화", reset, "비워 두면 유지합니다."),
+        h("p", { class: "hint full" }, "변경하면 이 사용자의 기존 로그인과 API 토큰이 해제됩니다."),
+        h("div", { class: "full" }, msg.el), h("div", { class: "dialog-actions full" }, cancelDialog(() => dialog.close()), save));
+      dialog = editorDialog(`${user.username} 계정 변경`, form, opener, () => formDrafts.delete(key)); changed();
+    }
+    function create(opener) {
+      const draft = formDrafts.get("new-user") || { username: "", role: "read" };
+      const id = h("input", { type: "text", autocomplete: "off", required: true, minlength: 3, maxlength: 64, value: draft.username });
+      const pw = h("input", { type: "password", autocomplete: "new-password", required: true, minlength: 12, maxlength: 128 });
+      const selectedRole = userRoleSelect(draft.role); const msg = msgBox(); let dialog;
+      const remember = () => formDrafts.set("new-user", { username: id.value, role: selectedRole.value });
+      id.addEventListener("input", remember); selectedRole.addEventListener("change", remember);
+      const save = h("button", { type: "submit", class: "primary" }, "사용자 생성");
+      const form = h("form", { class: "form", onsubmit: async (e) => {
+        e.preventDefault(); save.disabled = true;
+        try { const u = await api("/v1/users", { method: "POST", body: JSON.stringify({ username: id.value.trim(), password: pw.value, role: selectedRole.value }) });
+          pw.value = ""; formDrafts.delete("new-user"); await refresh(); if (alive()) { dialog.close("saved"); notice.ok(`${u.username} 사용자를 생성했습니다.`); }
+        } catch (err) { pw.value = ""; msg.err(errMsg(err)); save.disabled = false; }
+      } }, field("새 사용자 ID", id, "영문·숫자·점·밑줄·하이픈, 3~64자"), field("초기 비밀번호", pw, "12~128자"), field("초기 권한", selectedRole),
+        h("div", { class: "full" }, msg.el), h("div", { class: "dialog-actions full" }, cancelDialog(() => dialog.close()), save));
+      dialog = editorDialog("사용자 추가", form, opener, () => formDrafts.delete("new-user"));
+    }
+    async function manageScope(user, opener) {
+      const [hosts, current, history] = await Promise.all([
+        api("/v1/hosts"), api(`/v1/software-request-scopes/${enc(user.id)}`),
+        api(`/v1/software-request-scopes/${enc(user.id)}/history`),
+      ]);
+      const selected = new Set(current.host_ids); const searchHost = h("input", { type: "search", "aria-label": "호스트 범위 검색", placeholder: "호스트명·호스트 ID·자산번호·IP 검색" });
+      const list = h("div", { class: "scope-list", role: "group", "aria-label": "요청 가능 호스트" });
+      const msg = msgBox(); let dialog;
+      const drawHosts = () => {
+        const term = searchHost.value.trim().toLowerCase();
+        clear(list);
+        const rows = hosts.filter((host) => !term || [host.hostname, host.host_id, host.asset_no, ...(host.ips || [])].join(" ").toLowerCase().includes(term));
+        if (!rows.length) list.append(empty("조건에 맞는 호스트가 없습니다."));
+        for (const host of rows) {
+          const cb = h("input", { type: "checkbox", checked: selected.has(host.host_id), "aria-label": `${host.hostname} (${host.host_id})`, onchange: (e) => {
+            if (e.target.checked) selected.add(host.host_id); else selected.delete(host.host_id);
+            count.textContent = `선택 ${selected.size}대`;
+          } });
+          list.append(h("label", { class: "scope-row" }, cb, h("span", null, h("strong", null, host.hostname),
+            h("span", { class: "muted" }, `${host.asset_no ? ` · ${host.asset_no}` : " · 미등록 자산"} · ${host.host_id} · ${(host.ips || []).join(", ")}`))));
+        }
+      };
+      const count = h("p", { class: "hint" }, `선택 ${selected.size}대`);
+      const historyNode = h("details", { class: "scope-history" }, h("summary", null, "권한 변경 이력 보기"),
+        history.length ? table([
+          { title: "시각", sort: (r) => r.occurred_at, render: (r) => timeEl(r.occurred_at) },
+          { title: "변경자", render: (r) => r.actor_name },
+          { title: "이전 범위", render: (r) => `${r.old_host_ids.length}대` },
+          { title: "새 범위", render: (r) => `${r.new_host_ids.length}대` },
+        ], history, "범위 변경 이력이 없습니다.") : empty("범위 변경 이력이 없습니다."));
+      searchHost.addEventListener("input", drawHosts); drawHosts();
+      const save = h("button", { type: "button", class: "primary", onclick: async () => {
+        save.disabled = true; msg.clear();
+        try {
+          await api(`/v1/software-request-scopes/${enc(user.id)}`, { method: "PUT", body: JSON.stringify({ host_ids: [...selected] }) });
+          await refresh(); if (alive()) { dialog.close("saved"); notice.ok(`${user.username} 요청 가능 호스트 범위를 저장했습니다.`); }
+        } catch (err) { msg.err(errMsg(err)); save.disabled = false; }
+      } }, "범위 저장");
+      dialog = editorDialog(`${user.username} · 요청 호스트 범위`, h("div", null,
+        h("p", { class: "hint" }, "관리자가 명시적으로 지정한 호스트에 한해 업무용 앱 승인을 요청할 수 있습니다. OS 패키지와 개발 의존성은 승인 대상이 아닙니다."),
+        searchHost, count, list, historyNode, msg.el, h("div", { class: "dialog-actions" }, cancelDialog(() => dialog.close()), save)), opener);
+    }
+    search.addEventListener("input", () => { replaceQuery("#/users", { q: search.value.trim() }); draw(); });
+    draw();
+    return h("div", null, pageHeader("사용자 관리", h("button", { class: "primary", type: "button", onclick: (e) => create(e.currentTarget) }, "사용자 추가")),
+      h("div", { class: "toolbar" }, search), body, notice.node);
+  }
+
+  async function viewTokens(_, q, alive) {
+    if (!isAdmin()) return h("div", null, pageHeader("API 토큰"), h("div", { class: "panel" }, ADMIN_ONLY));
+    const users = await api("/v1/users"); let tokens = await api("/v1/tokens");
+    const notice = feedback(); const body = h("div");
+    const search = h("input", { type: "search", "aria-label": "토큰 검색", placeholder: "이름·사용자 검색", value: q.get("q") || "" });
+    const status = h("select", { "aria-label": "토큰 상태" }, ["전체", "유효", "회수됨", "만료", "계정 변경으로 무효"].map((v) => h("option", { value: v, selected: v === (q.get("status") || "전체") }, v)));
+    const ownerName = (r) => (users.find((u) => u.id === r.user_id) || {}).username || "수집기";
+    const draw = () => {
+      const term = search.value.trim().toLowerCase();
+      clear(body).append(table([
+        { title: "이름", sort: (r) => r.name, render: (r) => r.name }, { title: "사용자", sort: ownerName, render: ownerName },
+        { title: "권한", render: (r) => roleLabel(r.role) }, { title: "만료", sort: (r) => r.expires_at, render: (r) => timeEl(new Date(r.expires_at * 1000).toISOString()) },
+        { title: "상태", render: (r) => badge(r.status, r.status === "유효" ? "ok" : "") },
+        { title: "작업", render: (r) => h("button", { type: "button", disabled: r.status !== "유효", onclick: (e) => revoke(r, e.currentTarget) }, "회수") },
+      ], tokens.filter((r) => (status.value === "전체" || r.status === status.value) && (!term || `${r.name} ${ownerName(r)}`.toLowerCase().includes(term))), "조건에 맞는 API 토큰이 없습니다."));
     };
-    const id = h("input", { autocomplete: "off", required: true, minlength: 3, maxlength: 64 });
-    const pw = h("input", { type: "password", autocomplete: "new-password", required: true, minlength: 12, maxlength: 128 });
-    const newRole = roleSelect();
-    const create = h("button", { type: "submit", class: "primary" }, "사용자 생성");
-    const createForm = h("form", { class: "panel form", onsubmit: async (e) => {
-      e.preventDefault(); create.disabled = true;
-      try { await api("/v1/users", { method: "POST", body: JSON.stringify({ username: id.value.trim(), password: pw.value, role: newRole.value }) }); pw.value = ""; await render(); }
-      catch (err) { pw.value = ""; managementMsg.err(errMsg(err)); create.disabled = false; }
-    } }, field("새 사용자 ID", id), field("초기 비밀번호", pw), field("초기 권한", newRole), create, managementMsg.el);
-    const name = h("input", { required: true, maxlength: 100 });
-    const tokenRole = roleSelect("read", true);
-    const owner = h("select", null, h("option", { value: "" }, "사용자 선택"), users.filter((u) => u.active).map((u) => h("option", { value: u.id }, u.username)));
-    tokenRole.addEventListener("change", () => { owner.disabled = tokenRole.value === "ingest"; if (owner.disabled) owner.value = ""; });
-    const hours = h("input", { type: "number", min: 1, max: 720, value: 24, required: true });
-    const issued = h("div");
-    const tokenMsg = msgBox();
-    const tokenRows = h("div");
-    const drawTokens = (rows) => {
-      clear(tokenRows).append(table([
-        { title: "이름", sort: (r) => r.name, render: (r) => r.name },
-        { title: "사용자", render: (r) => (users.find((u) => u.id === r.user_id) || {}).username || "수집기" },
-        { title: "권한", render: (r) => ({ read: "조회", admin: "관리자", ingest: "수집 전용" })[r.role] },
-        { title: "만료", render: (r) => timeEl(new Date(r.expires_at * 1000).toISOString()) },
-        { title: "상태", render: (r) => r.status },
-        { title: "작업", render: (r) => h("button", { type: "button", disabled: r.revoked, onclick: async (e) => {
-          const button = e.currentTarget; button.disabled = true;
-          try { await api(`/v1/tokens/${enc(r.id)}`, { method: "DELETE" }); drawTokens(await api("/v1/tokens")); tokenMsg.ok("토큰을 회수했습니다."); }
-          catch (err) { tokenMsg.err(errMsg(err)); button.disabled = false; }
-        } }, "회수") },
-      ], rows, "발급한 API 토큰이 없습니다."));
-    };
-    drawTokens(tokens);
-    const issue = h("button", { type: "submit", class: "primary" }, "JWT 발급");
-    const issueForm = h("form", { class: "panel form", onsubmit: async (e) => {
-      e.preventDefault(); issue.disabled = true; clear(issued); tokenMsg.clear();
+    const refresh = async () => { const rows = await api("/v1/tokens"); if (alive()) { tokens = rows; draw(); } };
+    function revoke(token, opener) {
+      const msg = msgBox(); let dialog;
+      const confirm = h("button", { type: "button", class: "danger", onclick: async () => {
+        confirm.disabled = true; msg.clear();
+        try { await api(`/v1/tokens/${enc(token.id)}`, { method: "DELETE" }); await refresh(); if (alive()) { dialog.close("saved"); notice.ok(`${token.name} 토큰을 회수했습니다.`); } }
+        catch (err) { msg.err(errMsg(err)); confirm.disabled = false; }
+      } }, "토큰 회수");
+      const cancel = cancelDialog(() => dialog.close()); cancel.autofocus = true;
+      dialog = editorDialog("API 토큰 회수", h("div", null, h("p", null, h("strong", null, token.name)),
+        h("p", { class: "muted" }, `${ownerName(token)} · ${roleLabel(token.role)}`),
+        h("p", null, token.role === "ingest" ? "이 토큰을 사용하는 수집기의 전송이 즉시 중단됩니다. 새 토큰으로 수집기 설정을 변경해야 합니다." : "이 토큰을 사용하는 API 연결이 즉시 차단됩니다. 회수한 토큰은 다시 사용할 수 없습니다."),
+        msg.el, h("div", { class: "dialog-actions" }, cancel, confirm)), opener);
+    }
+    function issue(opener) {
+      const key = "new-token"; const draft = formDrafts.get(key) || { name: "", role: "read", owner: "", hours: "24" };
+      const name = h("input", { type: "text", required: true, maxlength: 100, value: draft.name });
+      const selectedRole = h("select", null, ["read", "ingest", "admin"].map((r) => h("option", { value: r, selected: r === draft.role }, roleLabel(r))));
+      const owner = h("select", { required: true }, h("option", { value: "" }, "사용자 선택"), users.filter((u) => u.active).map((u) => h("option", { value: u.id, selected: u.id === draft.owner }, u.username)));
+      const hours = h("select", null, [["24", "1일"], ["168", "7일"], ["720", "30일"], ["custom", "직접 입력"]].map(([v, label]) => h("option", { value: v, selected: draft.hours === v }, label)));
+      const custom = h("input", { type: "number", "aria-label": "유효 시간(시간)", min: 1, max: 720, value: draft.custom || 24, hidden: draft.hours !== "custom" });
+      const explanation = h("p", { class: "hint full" }); const expiry = h("p", { class: "hint full" }); const msg = msgBox(); let dialog;
+      const remember = () => {
+        const ingest = selectedRole.value === "ingest";
+        owner.disabled = ingest; owner.required = !ingest;
+        if (ingest) owner.value = "";
+        const canAdmin = users.some((u) => u.id === owner.value && u.role === "admin");
+        selectedRole.querySelector('option[value="admin"]').disabled = !canAdmin;
+        if (selectedRole.value === "admin" && !canAdmin) selectedRole.value = "read";
+        custom.hidden = hours.value !== "custom"; custom.required = !custom.hidden;
+        explanation.textContent = { read: "서버·소프트웨어·네트워크 정보를 조회합니다.", admin: "사용자·권한·설정 변경과 데이터 삭제를 포함한 관리 작업을 허용합니다.", ingest: "수집 정보 전송만 허용합니다. 사용자 없이 발급합니다." }[selectedRole.value];
+        const duration = Number(hours.value === "custom" ? custom.value : hours.value);
+        expiry.textContent = duration >= 1 && duration <= 720 ? `만료 예정: ${fmtTime(new Date(Date.now() + duration * 3600000).toISOString())}` : "유효 시간은 1~720시간입니다.";
+        formDrafts.set(key, { name: name.value, role: selectedRole.value, owner: owner.value, hours: hours.value, custom: custom.value });
+      };
+      [selectedRole, owner, hours].forEach((el) => el.addEventListener("change", remember)); [name, custom].forEach((el) => el.addEventListener("input", remember));
+      const save = h("button", { type: "submit", class: "primary" }, "JWT 발급");
+      const form = h("form", { class: "form", onsubmit: async (e) => {
+        e.preventDefault(); save.disabled = true; msg.clear();
+        try {
+          const result = await api("/v1/tokens", { method: "POST", body: JSON.stringify({ name: name.value.trim(), role: selectedRole.value,
+            user_id: selectedRole.value === "ingest" ? null : owner.value, expires_hours: Number(hours.value === "custom" ? custom.value : hours.value) }) });
+          formDrafts.delete(key); await refresh(); if (!alive()) return;
+          const secret = h("textarea", { readonly: true, "aria-label": "발급된 JWT", rows: 5 }); secret.value = result.access_token;
+          const copyMsg = msgBox();
+          const copy = h("button", { class: "primary", type: "button", onclick: async () => {
+            try { await navigator.clipboard.writeText(secret.value); copyMsg.ok("복사했습니다."); }
+            catch (_) { secret.focus(); secret.select(); copyMsg.info("토큰을 선택했습니다. 직접 복사하세요."); }
+          } }, "토큰 복사");
+          clear(form).append(h("p", { class: "full" }, "발급된 JWT는 이 화면에서만 확인할 수 있습니다. 닫기 전에 복사하세요."), h("div", { class: "full" }, secret),
+            h("div", { class: "full" }, copyMsg.el), h("div", { class: "dialog-actions full" }, copy, h("button", { type: "button", onclick: () => dialog.close("saved") }, "닫기")));
+          notice.ok(`${name.value.trim()} 토큰을 발급했습니다.`); copy.focus();
+        } catch (err) { msg.err(errMsg(err)); save.disabled = false; }
+      } }, field("토큰 이름", name), field("토큰 사용자", owner), field("발급 권한", selectedRole), explanation,
+        field("만료 기간", hours), h("div", { class: "full" }, custom), expiry, h("div", { class: "full" }, msg.el),
+        h("div", { class: "dialog-actions full" }, cancelDialog(() => dialog.close()), save));
+      dialog = editorDialog("API 토큰 발급", form, opener, () => formDrafts.delete(key)); remember();
+    }
+    const filter = () => { replaceQuery("#/tokens", { q: search.value.trim(), status: status.value === "전체" ? "" : status.value }); draw(); };
+    search.addEventListener("input", filter); status.addEventListener("change", filter); draw();
+    return h("div", null, pageHeader("API 토큰", h("button", { type: "button", class: "primary", onclick: (e) => issue(e.currentTarget) }, "API 토큰 발급")),
+      h("div", { class: "toolbar" }, search, status), body, notice.node);
+  }
+
+  // ---------- 업무용 앱 분류·사용 승인 ----------
+  const PRODUCT_CATEGORIES = {
+    business_app: "업무용 앱", os_package: "OS 패키지",
+    development_dependency: "개발 라이브러리·의존성", needs_review: "분류 확인 필요",
+  };
+  const REQUEST_STATUS = {
+    submitted: ["접수", "neutral"], reviewing: ["검토 중", "warn"],
+    needs_changes: ["보완 요청", "warn"], approved: ["승인", "ok"],
+    rejected: ["반려", "err"], withdrawn: ["철회", ""],
+  };
+  const IMPACT_STATUS = {
+    confirmed: ["영향 확인", "err"], needs_review: ["확인 필요", "warn"],
+    no_observed_match: ["확정 일치 없음", "neutral"], not_assessed: ["미평가", ""],
+    not_affected: ["영향 없음 판정", "ok"],
+  };
+  const productLabel = (v) => PRODUCT_CATEGORIES[v] || v || "분류 확인 필요";
+  const requestBadge = (v) => { const [label, kind] = REQUEST_STATUS[v] || [v, ""]; return badge(label, kind); };
+  const impactBadge = (v) => { const [label, kind] = IMPACT_STATUS[v] || [v, ""]; return badge(label, kind); };
+  const pageControls = (base, query, page, pageSize, total) => h("div", { class: "pagination", role: "group", "aria-label": "페이지 이동" },
+    h("span", { class: "muted", role: "status" }, `전체 ${total}건 · ${Math.min(total, (page - 1) * pageSize + 1)}–${Math.min(total, page * pageSize)}건 · ${page}페이지`),
+    h("button", { type: "button", disabled: page <= 1, onclick: () => setQuery(base, { ...query, page: page - 1 }) }, "이전"),
+    h("button", { type: "button", disabled: page * pageSize >= total, onclick: () => setQuery(base, { ...query, page: page + 1 }) }, "다음"));
+  const categorySelect = (value, onChange) => h("select", { "aria-label": "업무용 앱 분류", value, onchange: (e) => onChange(e.target.value) },
+    [["", "모든 분류"], ...Object.entries(PRODUCT_CATEGORIES)].map(([v, t]) => h("option", { value: v, selected: v === value }, t)));
+
+  async function viewBusinessSoftware(_, q, alive) {
+    const st = { q: q.get("q") || "", category: q.get("category") || "", page: Math.max(1, Number(q.get("page") || 1)) };
+    const base = "#/business-apps"; const body = h("div");
+    const search = h("input", { type: "search", "aria-label": "업무용 앱 검색", placeholder: "패키지 이름 검색", value: st.q, size: 30 });
+    const category = categorySelect(st.category, (value) => setQuery(base, { ...st, category: value, page: 1 }));
+    let products = [], total = 0, seq = 0;
+    const refresh = async () => {
+      const run = ++seq; const params = new URLSearchParams({ page: String(st.page), page_size: "50" });
+      if (st.q.trim()) params.set("q", st.q.trim()); if (st.category) params.set("category", st.category);
+      clear(body).append(h("p", { class: "muted", role: "status" }, "제품 분류를 불러오는 중…"));
       try {
-        const d = await api("/v1/tokens", { method: "POST", body: JSON.stringify({ name: name.value.trim(), role: tokenRole.value,
-          user_id: owner.value || null, expires_hours: Number(hours.value) }) });
-        const secret = h("textarea", { readonly: true, "aria-label": "발급된 JWT", rows: 4 }); secret.value = d.access_token;
-        issued.append(h("div", { class: "notice" }, "발급된 JWT는 지금 한 번만 표시됩니다. 복사해 안전하게 보관하세요."), secret);
-        drawTokens(await api("/v1/tokens")); tokenMsg.ok("JWT를 발급했습니다.");
-      } catch (err) { tokenMsg.err(errMsg(err)); }
-      issue.disabled = false;
-    } }, field("토큰 이름", name), field("발급 권한", tokenRole), field("토큰 사용자", owner, "조회·관리 토큰은 사용자 권한 안에서 발급됩니다. 수집 전용은 사용자 없이 발급합니다."),
-      field("유효 시간(시간)", hours, "1~720시간"), issue, tokenMsg.el, issued);
-    page.append(h("h2", null, "사용자 관리"), h("p", { class: "hint" }, "관리자는 조회·관리 권한을 지정하고 계정을 비활성화하거나 비밀번호를 초기화할 수 있습니다. 변경하면 해당 계정의 기존 JWT가 해제됩니다."),
-      table([{ title: "ID", sort: (u) => u.username, render: (u) => u.username }, { title: "권한", render: (u) => u.role === "admin" ? "관리자" : "조회" },
-        { title: "상태", render: (u) => u.active ? "활성" : "비활성" }, { title: "작업", render: (u) => h("button", { type: "button", onclick: () => edit(u) }, "권한·계정 변경") }], users, "등록된 사용자가 없습니다."),
-      editor, h("h3", null, "사용자 추가"), createForm, h("h2", null, "API 토큰(JWT) 발급·회수"), issueForm, tokenRows);
-    return page;
+        const result = await api(`/v1/software-products?${params}`);
+        if (!alive() || run !== seq) return;
+        products = result.items; total = result.total;
+        clear(body).append(table([
+          { title: "제품", sort: (p) => p.product_name || p.name, render: (p) => h("span", null,
+            link(p.product_name || p.name, `#/software/${enc(p.name)}`), h("span", { class: "muted" }, ` · ${p.name}`)) },
+          { title: "출처 / 아키텍처", render: (p) => `${p.source} · ${p.arch || "-"}` },
+          { title: "분류", render: (p) => badge(productLabel(p.category), p.category === "business_app" ? "ok" : p.category === "needs_review" ? "warn" : "neutral") },
+          { title: "설치 / 호스트 / 버전", sort: (p) => p.install_count, render: (p) => `${p.install_count}설치 · ${p.host_count}대 · ${p.version_count}개 버전` },
+          { title: "게시자 / 근거", render: (p) => h("span", { title: p.classification_evidence || "분류 이력이 없습니다." },
+            [p.publisher || "게시자 미기록", p.classification_evidence || "분류 근거 없음"].join(" · ")) },
+          { title: "작업", render: (p) => h("span", { class: "row-actions" },
+            isAdminSession() ? h("button", { type: "button", onclick: (e) => editClassification(p, e.currentTarget) }, "분류 편집") : null,
+            isAdminSession() ? h("button", { type: "button", onclick: (e) => classificationHistory(p, e.currentTarget) }, "분류 이력") : null,
+            role === "request" && authKind === "session" && p.category === "business_app" ? h("button", { type: "button", class: "primary", onclick: (e) => requestProduct(p, e.currentTarget) }, "사용 승인 요청") : null,
+            p.category !== "business_app" ? h("span", { class: "muted" }, "승인 요청 대상 아님") : null) },
+        ], products, "검색 결과가 없습니다."), pageControls(base, st, st.page, 50, total));
+      } catch (err) { if (alive() && run === seq) clear(body).append(h("div", { class: "error", role: "alert" }, err.message)); }
+    };
+    const applySearch = () => { st.q = search.value; st.page = 1; replaceQuery(base, { ...st, q: st.q.trim() }); refresh(); };
+    let timer; search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(applySearch, 250); });
+    async function editClassification(product, opener) {
+      const current = await api(`/v1/software-classification-history?source=${enc(product.source)}&name=${enc(product.name)}&arch=${enc(product.arch)}`);
+      const categoryInput = h("select", null, Object.entries(PRODUCT_CATEGORIES).map(([v, t]) => h("option", { value: v, selected: product.category === v }, t)));
+      const productName = h("input", { type: "text", maxlength: 512, value: product.product_name || product.name });
+      const publisher = h("input", { type: "text", maxlength: 255, value: product.publisher || "" });
+      const evidence = h("textarea", { required: true, maxlength: 1000, rows: 4, placeholder: "패키지 메타데이터·게시자·업무 소유자 확인 등 분류 근거" }, product.classification_evidence || "");
+      const msg = msgBox(); let dialog;
+      const save = h("button", { type: "submit", class: "primary" }, "분류 저장");
+      const form = h("form", { class: "form", onsubmit: async (e) => {
+        e.preventDefault(); if (evidence.value.trim().length < 1) { evidence.focus(); return; }
+        save.disabled = true; msg.clear();
+        try {
+          await api("/v1/software-products/classification", { method: "PUT", body: JSON.stringify({
+            source: product.source, name: product.name, arch: product.arch, category: categoryInput.value,
+            product_name: productName.value.trim(), publisher: publisher.value.trim(), evidence: evidence.value.trim(),
+            expected_revision: product.revision ?? null,
+          }) });
+          await refresh(); if (alive()) { dialog.close("saved"); notice.ok(`${product.name} 분류를 저장했습니다.`); }
+        } catch (err) { msg.err(errMsg(err)); save.disabled = false; }
+      } }, field("분류", categoryInput), field("제품 표시명", productName), field("게시자", publisher),
+        field("관리자 분류 근거", evidence, "소스 이름만으로 분류하지 않습니다. 분류 확인 필요로 두면 요청 대상이 되지 않습니다."),
+        current.length ? h("p", { class: "hint full" }, `최근 변경 ${current[0].changed_by_name} · ${fmtTime(current[0].changed_at)}`) : null,
+        h("div", { class: "full" }, msg.el), h("div", { class: "dialog-actions full" }, cancelDialog(() => dialog.close()), save));
+      dialog = editorDialog(`${product.product_name || product.name} 분류`, form, opener);
+    }
+    async function classificationHistory(product, opener) {
+      const history = await api(`/v1/software-classification-history?source=${enc(product.source)}&name=${enc(product.name)}&arch=${enc(product.arch)}`);
+      const rows = table([
+        { title: "시각", sort: (r) => r.changed_at, render: (r) => timeEl(r.changed_at) },
+        { title: "변경자", render: (r) => r.changed_by_name },
+        { title: "이전 분류", render: (r) => productLabel(r.old_category || "미분류") },
+        { title: "새 분류", render: (r) => productLabel(r.new_category) },
+        { title: "근거", render: (r) => r.evidence },
+      ], history, "분류 변경 이력이 없습니다.");
+      let dialog; dialog = editorDialog(`${product.name} 분류 이력`, h("div", null, rows,
+        h("div", { class: "dialog-actions" }, h("button", { type: "button", onclick: () => dialog.close() }, "닫기"))), opener);
+    }
+    async function requestProduct(product, opener) {
+      const [detail, hostRows, scope] = await Promise.all([
+        api(`/v1/software/${enc(product.name)}`), api("/v1/hosts"), api("/v1/software-request-scopes/me"),
+      ]);
+      const scoped = new Set(scope.host_ids);
+      const installs = detail.hosts.filter((i) => i.source === product.source && i.arch === product.arch && scoped.has(i.host_id));
+      const versions = [...new Set(installs.map((i) => i.version).filter(Boolean))].sort((a, b) => collator.compare(b, a));
+      if (!installs.length || !versions.length) { alert("관리자가 요청할 호스트 범위를 지정하지 않았거나, 해당 범위에 설치된 버전이 없습니다."); return; }
+      const version = h("select", { "aria-label": "설치 버전", required: true }, versions.map((v) => h("option", { value: v }, v)));
+      const hostChoices = h("div", { class: "scope-list", role: "group", "aria-label": "승인 요청 대상 호스트" });
+      const purpose = h("textarea", { required: true, minlength: 5, maxlength: 2000, rows: 4, placeholder: "업무에서 이 제품이 필요한 이유" });
+      const license = h("textarea", { required: true, minlength: 3, maxlength: 2000, rows: 3, placeholder: "사용권·계약·오픈소스 라이선스 확인 근거" });
+      const msg = msgBox(); let dialog;
+      const drawHosts = () => {
+        const allowed = new Set(installs.filter((i) => i.version === version.value).map((i) => i.host_id));
+        clear(hostChoices);
+        const rows = hostRows.filter((host) => allowed.has(host.host_id));
+        rows.forEach((host) => hostChoices.append(h("label", { class: "scope-row" },
+          h("input", { type: "checkbox", value: host.host_id, "aria-label": `${host.hostname} (${host.host_id})` }),
+          h("span", null, h("strong", null, host.hostname), h("span", { class: "muted" }, ` · ${host.asset_no || "자산 미등록"} · ${host.host_id}`)))));
+      };
+      version.addEventListener("change", drawHosts); drawHosts();
+      const save = h("button", { type: "submit", class: "primary" }, "승인 요청 제출");
+      const form = h("form", { class: "form", onsubmit: async (e) => {
+        e.preventDefault();
+        const host_ids = [...hostChoices.querySelectorAll('input[type="checkbox"]:checked')].map((el) => el.value);
+        if (!host_ids.length) { msg.err("대상 호스트를 한 대 이상 선택하세요."); return; }
+        save.disabled = true; msg.clear();
+        try {
+          const result = await api("/v1/software-requests", { method: "POST", body: JSON.stringify({
+            source: product.source, name: product.name, arch: product.arch, version: version.value,
+            purpose: purpose.value.trim(), license_evidence: license.value.trim(), host_ids,
+          }) });
+          dialog.close("saved"); location.hash = `#/sw-requests/${result.id}?return=${enc(currentReturn())}`;
+        } catch (err) { msg.err(err.status === 409 && err.message.includes("duplicate_request")
+          ? "같은 제품·버전·대상 호스트의 진행 요청이 이미 있습니다. 기존 요청을 열어 확인하세요."
+          : err.status === 409 ? `${err.message} 이미 유효한 승인 범위를 확인하세요.` : errMsg(err)); save.disabled = false; }
+      } }, field("제품", h("p", { class: "read-value" }, `${product.product_name || product.name} · ${product.source} · ${product.arch}`)),
+        field("설치 버전", version), field("대상 호스트", hostChoices, "선택한 버전이 설치된 허용 범위의 호스트만 표시합니다. 최대 100대."),
+        field("업무 목적", purpose), field("사용권 근거", license),
+        h("p", { class: "hint full" }, "업무용 앱의 조직 내 사용 승인 요청입니다. 설치 실행 승인·신규 목록 등록 요청이 아니며 OS 패키지와 개발 의존성은 대상에서 제외됩니다."),
+        h("div", { class: "full" }, msg.el), h("div", { class: "dialog-actions full" }, cancelDialog(() => dialog.close()), save));
+      dialog = editorDialog("업무용 앱 사용 승인 요청", form, opener);
+    }
+    const notice = feedback();
+    await refresh();
+    return h("div", null, pageHeader("업무용 앱", isAdmin() ? h("span", { class: "muted" }, "관리자 분류 근거와 변경 이력을 관리합니다.") : null,
+      "설치 인벤토리의 전체 소프트웨어를 분류합니다. OS 패키지와 개발 의존성은 계속 조회·CVE 분석에 포함하며 승인 요청 대상에서만 제외합니다."),
+      h("div", { class: "toolbar" }, search, category), body, notice.node);
+  }
+
+  async function viewSoftwareRequests(rest, q, alive) {
+    if (role !== "admin" && role !== "request") return h("div", null, pageHeader("SW 사용 승인"), h("div", { class: "panel" }, "조회 전용 계정에는 승인 요청 권한이 없습니다."));
+    if (role === "request" && authKind !== "session") return h("div", null, pageHeader("SW 사용 승인"), h("div", { class: "panel" }, "요청자는 개인 세션으로 로그인해야 요청·상세·상태 변경을 할 수 있습니다."));
+    if (rest[0]) return softwareRequestDetail(Number(rest[0]), q, alive);
+    const st = { q: q.get("q") || "", status: q.get("status") || "", mine: q.get("mine") === "true",
+      unassigned: q.get("unassigned") === "true", overdue: q.get("overdue") === "true", page: Math.max(1, Number(q.get("page") || 1)) };
+    const base = "#/sw-requests"; let result = { items: [], total: 0 }; const body = h("div");
+    const search = h("input", { type: "search", "aria-label": "승인 요청 검색", placeholder: "요청 번호·제품·요청자", value: st.q });
+    const status = h("select", { "aria-label": "요청 상태 필터" }, [["", "모든 상태"], ...Object.entries(REQUEST_STATUS)].map(([v, [label]]) => h("option", { value: v, selected: v === st.status }, label)));
+    const mine = h("input", { type: "checkbox", checked: st.mine, "aria-label": "내 요청" });
+    const unassigned = h("input", { type: "checkbox", checked: st.unassigned, "aria-label": "미배정" });
+    const overdue = h("input", { type: "checkbox", checked: st.overdue, "aria-label": "처리 기한 초과" });
+    if (!isAdminSession()) mine.disabled = true;
+    const refresh = async () => {
+      const params = new URLSearchParams({ page: String(st.page), page_size: "50" });
+      if (st.q.trim()) params.set("q", st.q.trim()); if (st.status) params.set("status", st.status);
+      if (st.mine && isAdminSession()) params.set("mine", "true"); if (st.unassigned && role === "admin") params.set("unassigned", "true");
+      if (st.overdue && role === "admin") params.set("overdue", "true");
+      clear(body).append(h("p", { class: "muted", role: "status" }, "요청을 불러오는 중…"));
+      try {
+        result = await api(`/v1/software-requests?${params}`); if (!alive()) return;
+        clear(body).append(table([
+          { title: "요청 번호", sort: (r) => r.id, render: (r) => link(r.request_no, withReturn(`#/sw-requests/${r.id}`)) },
+          { title: "제품·버전", render: (r) => h("span", null, link(r.product_name, `#/software/${enc(r.name)}`), ` · ${r.version}`) },
+          { title: "요청자", sort: (r) => r.requester_name, render: (r) => r.requester_name },
+          { title: "대상 호스트", sort: (r) => r.host_count, render: (r) => `${r.host_count}대` },
+          { title: "상태", render: (r) => requestBadge(r.status) },
+          { title: "담당자 / 기한", render: (r) => h("span", null, r.assignee_name || "미배정", h("br"), timeEl(r.due_at)) },
+          { title: "갱신", sort: (r) => r.updated_at, render: (r) => timeEl(r.updated_at) },
+        ], result.items, "요청이 없습니다."), pageControls(base, st, st.page, 50, result.total));
+      } catch (err) { if (alive()) clear(body).append(h("div", { class: "error", role: "alert" }, errMsg(err))); }
+    };
+    const apply = () => { st.q = search.value; st.status = status.value; st.mine = isAdminSession() && mine.checked; st.unassigned = role === "admin" && unassigned.checked; st.overdue = role === "admin" && overdue.checked; st.page = 1;
+      replaceQuery(base, { ...st, q: st.q.trim() }); refresh(); };
+    let timer; search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(apply, 250); });
+    [status, mine, unassigned, overdue].forEach((el) => el.addEventListener("change", apply));
+    await refresh();
+    return h("div", null, pageHeader("SW 사용 승인 요청", h("a", { href: "#/business-apps", class: "button-link" }, "업무용 앱 찾기"),
+      "접수·배정·보완·재제출·결정과 승인 범위를 이력으로 관리합니다."),
+      h("div", { class: "toolbar" }, search, status, isAdminSession() ? h("label", { class: "check-filter" }, mine, "내 요청") : null,
+        role === "admin" ? h("label", { class: "check-filter" }, unassigned, "미배정") : null,
+        role === "admin" ? h("label", { class: "check-filter" }, overdue, "기한 초과") : null), body);
+  }
+
+  async function softwareRequestDetail(requestId, q, alive) {
+    if (!Number.isSafeInteger(requestId) || requestId < 1) throw new ApiError(404, "요청을 찾을 수 없습니다.");
+    const item = await api(`/v1/software-requests/${requestId}`);
+    const base = returnHash(q) || "#/sw-requests"; const root = h("div");
+    const admins = isAdminSession() ? (await api("/v1/users")).filter((u) => u.active && u.role === "admin") : [];
+    const dateLocal = (iso) => {
+      if (!iso) return ""; const d = new Date(iso); const local = new Date(d.getTime() - d.getTimezoneOffset() * 60000); return local.toISOString().slice(0, 16);
+    };
+    const localIso = (value) => {
+      const d = new Date(value); return Number.isNaN(d.getTime()) ? "" : d.toISOString().replace(/\.\d{3}Z$/, "Z");
+    };
+    const runAction = async (action, payload, dialog, save, msg) => {
+      save.disabled = true; msg.clear();
+      try {
+        const updated = await api(`/v1/software-requests/${requestId}/actions`, { method: "POST", body: JSON.stringify({ action, expected_revision: item.revision, ...payload }) });
+        Object.assign(item, updated); dialog.close("saved"); if (alive()) clear(root).append(draw());
+      } catch (err) { msg.err(err.status === 409 ? `${err.message} 최신 요청을 다시 불러와 확인하세요.` : errMsg(err)); save.disabled = false; }
+    };
+    function actionForm(title, action, fields, payload, opener) {
+      const msg = msgBox(); let dialog;
+      const save = h("button", { type: "submit", class: action === "reject" || action === "revoke_approval" ? "danger" : "primary" }, title);
+      const form = h("form", { class: "form", onsubmit: (e) => { e.preventDefault(); runAction(action, payload(), dialog, save, msg); } },
+        ...fields, h("div", { class: "full" }, msg.el), h("div", { class: "dialog-actions full" }, cancelDialog(() => dialog.close()), save));
+      dialog = editorDialog(title, form, opener); return dialog;
+    }
+    const reasonField = (label = "사유") => h("textarea", { required: true, maxlength: 2000, rows: 3, placeholder: `${label}를 구체적으로 입력하세요.` });
+    const datetimeField = (label, value) => h("input", { type: "datetime-local", required: true, value: dateLocal(value) });
+    function draw() {
+      const status = item.status; const canDecide = isAdminSession();
+      const actions = [];
+      if (canDecide && ["submitted", "reviewing", "needs_changes"].includes(status)) actions.push(h("button", { type: "button", class: "primary", onclick: (e) => {
+        const assignee = h("select", { required: true }, h("option", { value: "" }, "담당 관리자 선택"), admins.map((u) => h("option", { value: u.id, selected: u.id === item.assignee_id }, u.username)));
+        const due = datetimeField("처리 기한", item.due_at);
+        actionForm(item.assignee_id ? "담당 재배정" : "담당 배정", "assign", [field("담당자", assignee), field("처리 기한", due, "브라우저 지역 시각을 UTC 시각으로 변환해 저장합니다.")], () => ({ assignee_id: assignee.value, due_at: localIso(due.value) }), e.currentTarget);
+      } }, item.assignee_id ? "담당 재배정" : "담당 배정"));
+      if (canDecide && ["submitted", "reviewing"].includes(status)) actions.push(h("button", { type: "button", onclick: (e) => {
+        const reason = reasonField("보완 사유"); actionForm("보완 요청", "request_changes", [field("보완 사유", reason)], () => ({ reason: reason.value.trim() }), e.currentTarget);
+      } }, "보완 요청"));
+      if (canDecide && status === "reviewing") actions.push(h("button", { type: "button", class: "primary", onclick: (e) => {
+        const reason = reasonField("승인 사유"), until = datetimeField("승인 유효 기한", item.approval_until);
+        actionForm("승인", "approve", [field("승인 사유", reason), field("승인 유효 기한", until, "이 기한은 내부 승인 효력 기한입니다. 시간대는 UTC로 정규화합니다.")],
+          () => ({ reason: reason.value.trim(), approval_until: localIso(until.value) }), e.currentTarget);
+      } }, "승인"));
+      if (canDecide && ["submitted", "reviewing", "needs_changes"].includes(status)) actions.push(h("button", { type: "button", class: "danger", onclick: (e) => {
+        const reason = reasonField("반려 사유"); actionForm("반려", "reject", [field("반려 사유", reason)], () => ({ reason: reason.value.trim() }), e.currentTarget);
+      } }, "반려"));
+      if (role === "request" && status === "needs_changes") actions.push(h("button", { type: "button", class: "primary", onclick: (e) => {
+        const purpose = h("textarea", { required: true, minlength: 5, maxlength: 2000, rows: 3, value: item.purpose });
+        const license = h("textarea", { required: true, minlength: 3, maxlength: 2000, rows: 3, value: item.license_evidence });
+        actionForm("보완 후 재제출", "resubmit", [field("업무 목적", purpose), field("사용권 근거", license)],
+          () => ({ purpose: purpose.value.trim(), license_evidence: license.value.trim() }), e.currentTarget);
+      } }, "같은 요청 번호로 재제출"));
+      if (role === "request" && ["submitted", "reviewing", "needs_changes"].includes(status)) actions.push(h("button", { type: "button", onclick: (e) => {
+        const reason = h("textarea", { maxlength: 2000, rows: 3, placeholder: "철회 사유(선택)" });
+        actionForm("요청 철회", "withdraw", [field("철회 사유", reason)], () => ({ reason: reason.value.trim() }), e.currentTarget);
+      } }, "요청 철회"));
+      if (canDecide && status === "approved" && item.approvals.some((a) => a.effective_state === "active")) actions.push(h("button", { type: "button", class: "danger", onclick: (e) => {
+        const reason = reasonField("승인 취소 사유"); actionForm("승인 범위 취소", "revoke_approval", [field("취소 사유", reason)], () => ({ reason: reason.value.trim() }), e.currentTarget);
+      } }, "현재 승인 취소"));
+      return h("div", null,
+        pageHeader(item.request_no, h("a", { href: base, class: "button-link" }, "← 요청함"), `${productLabel("business_app")} · revision ${item.revision}`),
+        h("div", { class: "action-bar" }, requestBadge(status), ...actions),
+        h("div", { class: "request-grid" },
+          h("section", { class: "panel" }, h("h2", null, "요청 내용"),
+            h("dl", { class: "detail-list" }, h("dt", null, "제품"), h("dd", null, link(item.product_name, `#/software/${enc(item.name)}`), ` · ${item.source} · ${item.arch}`),
+              h("dt", null, "버전"), h("dd", null, item.version), h("dt", null, "요청자"), h("dd", null, item.requester_name),
+              h("dt", null, "대상 호스트"), h("dd", null, item.hosts.map((host) => link(host.hostname, `#/hosts/${enc(host.host_id)}`))),
+              h("dt", null, "업무 목적"), h("dd", null, item.purpose), h("dt", null, "사용권 근거"), h("dd", null, item.license_evidence),
+              h("dt", null, "담당 / 처리 기한"), h("dd", null, `${item.assignee_name || "미배정"} · `, timeEl(item.due_at)),
+              h("dt", null, "승인 유효 기한"), h("dd", null, timeEl(item.approval_until)),
+              h("dt", null, "최근 판정 사유"), h("dd", null, item.decision_reason || "-"),
+              h("dt", null, "생성 / 갱신"), h("dd", null, timeEl(item.created_at), " · ", timeEl(item.updated_at)))),
+          h("section", { class: "panel" }, h("h2", null, "유효 승인 범위"),
+            item.approvals.length ? table([
+              { title: "호스트", render: (a) => link(a.host_id, `#/hosts/${enc(a.host_id)}`) },
+              { title: "승인 버전", render: (a) => a.version },
+              { title: "유효 기간", render: (a) => h("span", null, timeEl(a.valid_from), " – ", timeEl(a.valid_until)) },
+              { title: "상태", render: (a) => badge(a.effective_state, a.effective_state === "active" ? "ok" : "neutral") },
+              { title: "결정자 / 사유", render: (a) => `${a.decided_by_name} · ${a.reason}` },
+            ], item.approvals, "승인 기록이 없습니다.") : empty("승인 기록이 없습니다."))),
+        h("section", { class: "panel" }, h("h2", null, "변경 이력"), table([
+          { title: "시각", sort: (e) => e.occurred_at, render: (e) => timeEl(e.occurred_at) },
+          { title: "변경자", render: (e) => e.actor_name },
+          { title: "작업", render: (e) => e.action },
+          { title: "상태", render: (e) => `${e.from_status || "-"} → ${e.to_status}` },
+          { title: "사유 / 세부 내용", render: (e) => h("span", null, e.reason || "-", h("details", null, h("summary", null, "세부 내용"), h("pre", { class: "json" }, JSON.stringify(e.detail, null, 2)))) },
+          { title: "revision", render: (e) => e.revision },
+        ], item.history, "요청 이력이 없습니다.")));
+    }
+    clear(root).append(draw()); return root;
+  }
+
+  // ---------- CVE / KEV ----------
+  async function viewVulnerabilities(rest, q, alive) {
+    if (rest[0]) return vulnerabilityDetail(rest[0], q, alive);
+    const st = { q: q.get("q") || "", kev: q.get("kev") === "true", impact: q.get("impact") || "", host: q.get("host") || "", page: Math.max(1, Number(q.get("page") || 1)) };
+    const base = "#/cves", body = h("div"), feedBox = h("div"), msg = feedback(); let seq = 0;
+    const search = h("input", { type: "search", "aria-label": "CVE 검색", placeholder: "CVE ID·설명·KEV 제품", value: st.q });
+    const kev = h("input", { type: "checkbox", checked: st.kev, "aria-label": "CISA KEV만 보기" });
+    const impact = h("select", { "aria-label": "CVE 영향 판정" }, [["", "모든 영향 상태"], ...Object.entries(IMPACT_STATUS)].map(([v, [label]]) => h("option", { value: v, selected: v === st.impact }, label)));
+    const refresh = async () => {
+      const run = ++seq; const params = new URLSearchParams({ page: String(st.page), page_size: "50" });
+      if (st.q.trim()) params.set("q", st.q.trim()); if (st.kev) params.set("kev", "true"); if (st.impact) params.set("impact", st.impact); if (st.host) params.set("host", st.host);
+      clear(body).append(h("p", { class: "muted", role: "status" }, "CVE 자료를 불러오는 중…"));
+      try {
+        const [result, feeds] = await Promise.all([api(`/v1/vulnerabilities?${params}`), api("/v1/vulnerability-feeds")]);
+        if (!alive() || run !== seq) return;
+        const items = result.items; clear(feedBox).append(h("div", { class: "feed-grid" }, feeds.length ? feeds.map((f) => h("div", { class: "feed-status" },
+          h("strong", null, f.source === "cisa_kev" ? "CISA KEV" : "NVD"), badge(f.state, f.state === "ok" ? "ok" : f.state === "failed" ? "err" : "warn"),
+          h("span", null, `항목 ${f.records} · 데이터 버전 ${f.data_version || "-"}`),
+          h("span", null, "마지막 성공 ", timeEl(f.last_success_at), " · 시도 ", timeEl(f.last_attempt_at)),
+          f.last_error ? h("span", { class: "error-text" }, f.last_error) : null)) : empty("피드 동기화를 실행하지 않았습니다.")));
+        clear(body).append(table([
+          { title: "KEV", render: (r) => r.vendor ? badge("CISA KEV", "err") : "-" },
+          { title: "CVE / 제품", sort: (r) => r.cve_id, render: (r) => h("span", null,
+            link(r.cve_id, `#/cves/${enc(r.cve_id)}`), h("span", { class: "muted" }, ` · ${r.vendor || "NVD"} ${r.product || ""}`)) },
+          { title: "CVSS", sort: (r) => Number(r.cvss_score), render: (r) => r.cvss_score == null ? "-" : h("span", null, r.cvss_score, r.cvss_severity ? ` · ${r.cvss_severity}` : "") },
+          { title: "영향 판정", render: (r) => impactBadge(r.impact_status) },
+          { title: "영향 호스트 / 설치", sort: (r) => r.host_count, render: (r) => `${r.host_count || 0}대 · ${r.install_count || 0}설치` },
+          { title: "KEV 추가 / 기한", sort: (r) => r.date_added, render: (r) => r.vendor ? `${r.date_added || "-"} · ${r.due_date || "기한 없음"}` : "-" },
+          { title: "NVD 갱신", sort: (r) => r.modified_at, render: (r) => timeEl(r.modified_at) },
+        ], items, "CVE가 없습니다."), pageControls(base, st, st.page, 50, result.total));
+      } catch (err) { if (alive() && run === seq) clear(body).append(h("div", { class: "error", role: "alert" }, err.message)); }
+    };
+    const apply = () => { st.q = search.value; st.kev = kev.checked; st.impact = impact.value; st.page = 1; replaceQuery(base, { ...st, q: st.q.trim() }); refresh(); };
+    let timer; search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(apply, 250); }); [kev, impact].forEach((el) => el.addEventListener("change", apply));
+    const syncButton = isAdminSession() ? h("button", { type: "button", class: "primary", onclick: async (e) => {
+      const button = e.currentTarget; button.disabled = true; button.textContent = "피드 갱신 중…";
+      try { const r = await api("/v1/vulnerabilities/sync", { method: "POST" });
+        const failed = r.feeds.filter((f) => f.state === "failed").length;
+        msg.ok(failed ? "일부 피드 갱신이 실패했습니다. 마지막 성공 자료는 유지했습니다." : "CISA KEV 및 NVD 피드 갱신을 처리했습니다."); await refresh();
+      } catch (err) { msg.ok(errMsg(err)); } finally { button.disabled = false; button.textContent = "KEV·NVD 갱신"; }
+    } }, "KEV·NVD 갱신") : null;
+    await refresh();
+    return h("div", null, pageHeader("취약점 영향 조회", syncButton, "CISA KEV를 우선 표시합니다. 영향 확정은 정확한 제품·아키텍처·설치 버전과 관리자 근거가 있어야 합니다."),
+      feedBox, st.host ? h("div", { class: "toolbar" }, chip(`호스트: ${st.host}`, () => setQuery(base, { ...st, host: "", page: 1 }), "호스트")) : null,
+      h("div", { class: "toolbar" }, search, h("label", { class: "check-filter" }, kev, "CISA KEV만"), impact), body, msg.node);
+  }
+
+  async function vulnerabilityDetail(cveId, q, alive) {
+    const item = await api(`/v1/vulnerabilities/${enc(cveId)}`); const root = h("div");
+    const kev = item.kev;
+    const matches = item.matches || [];
+    const admin = isAdminSession();
+    const notice = feedback();
+    const referenceList = (item.references || []).map((r) => h("li", null, h("a", { href: r.url, target: "_blank", rel: "noopener noreferrer" }, r.url), r.source ? ` · ${r.source}` : ""));
+    const draw = () => h("div", null,
+      pageHeader(cveId, h("a", { href: returnHash(q) || "#/cves", class: "button-link" }, "← 취약점 목록"),
+        h("span", null, `NVD 상태 ${item.nvd_status || "-"} · 발행 `, timeEl(item.published_at), " · 갱신 ", timeEl(item.modified_at))),
+      kev ? h("section", { class: "kev-banner" }, h("div", null, badge("CISA KEV", "err"), h("strong", null, `${kev.vendor} · ${kev.product}`)),
+        h("p", null, kev.vulnerability_name), h("p", null, `추가일 ${kev.date_added} · CISA 조치 기한 ${kev.due_date || "없음"} · 랜섬웨어 사용 ${kev.ransomware_use || "알 수 없음"}`),
+        h("p", null, kev.required_action || ""), kev.notes ? h("p", { class: "muted" }, kev.notes) : null) : null,
+      h("div", { class: "request-grid" },
+        h("section", { class: "panel" }, h("h2", null, "NVD 취약점 정보"), h("p", null, item.description || "설명이 없습니다."),
+          h("dl", { class: "detail-list" }, h("dt", null, "CVSS"), h("dd", null, item.cvss_score ? `${item.cvss_score} · ${item.cvss_severity || ""}` : "점수 없음"),
+            h("dt", null, "NVD 기준 수정"), h("dd", null, timeEl(item.modified_at)), h("dt", null, "피드 수집"), h("dd", null, timeEl(item.nvd_fetched_at))),
+          referenceList.length ? h("details", null, h("summary", null, `참고 자료 ${referenceList.length}건`), h("ul", null, referenceList)) : empty("참고 링크가 없습니다."),
+          h("details", { class: "raw-json" }, h("summary", null, "NVD CVSS 메트릭과 CPE 적용 조건"), h("pre", { class: "json" }, JSON.stringify({ cvss_metrics: item.cvss_metrics, configurations: item.configurations }, null, 2)))),
+        h("section", { class: "panel" }, h("h2", null, "제품 영향 판정"),
+          matches.length ? matches.map((match) => h("article", { class: "match-card" },
+            h("div", { class: "section-heading" }, h("strong", null, link(`${match.name} · ${match.source} · ${match.arch}`, `#/software/${enc(match.name)}`)),
+              impactBadge(match.status === "affected_confirmed" ? "confirmed" : match.status === "needs_review" ? "needs_review" : "not_affected")),
+            h("p", null, match.evidence), match.conditions ? h("p", { class: "muted" }, `적용 조건: ${match.conditions}`) : null,
+            match.affected_versions?.length ? h("p", null, `영향 확정 버전: ${match.affected_versions.join(", ")}`) : null,
+            h("p", { class: "muted" }, `근거 갱신 ${match.updated_by} · `, timeEl(match.updated_at), ` · revision ${match.revision}`),
+            table([
+              { title: "호스트", render: (r) => link(r.hostname, `#/hosts/${enc(r.host_id)}`) },
+              { title: "자산", render: (r) => r.asset_no ? assetLink(`#/assets/${r.asset_id}`, r.asset_no) : "미등록" },
+              { title: "설치 버전", render: (r) => r.version },
+              { title: "제품", render: (r) => link(`${r.name} · ${r.source}`, `#/software/${enc(r.name)}`) },
+            ], match.installations || [], "현재 설치 데이터에 일치하는 행이 없습니다."),
+            admin ? h("button", { type: "button", onclick: (e) => editMatch(match, e.currentTarget) }, "판정 근거 편집") : null))
+            : empty("제품 영향 판정이 없습니다. 미평가를 영향 없음으로 간주하지 않습니다."),
+          admin ? h("button", { type: "button", class: "primary", onclick: (e) => editMatch(null, e.currentTarget) }, "제품 영향 판정 추가") : null)),
+      h("section", { class: "panel" }, h("h2", null, "피드 상태"), item.feed_status?.length ? table([
+        { title: "출처", render: (r) => r.source }, { title: "상태", render: (r) => badge(r.state, r.state === "ok" ? "ok" : r.state === "failed" ? "err" : "warn") },
+        { title: "마지막 성공", render: (r) => timeEl(r.last_success_at) }, { title: "마지막 시도", render: (r) => timeEl(r.last_attempt_at) },
+        { title: "데이터 버전 / 오류", render: (r) => `${r.data_version || "-"}${r.last_error ? ` · ${r.last_error}` : ""}` },
+      ], item.feed_status) : empty("피드 수집을 실행하지 않았습니다.")), notice.node);
+    function editMatch(match, opener) {
+      const currentRevision = match?.revision ?? null;
+      const productSearch = h("input", { type: "search", "aria-label": "영향 제품 검색", placeholder: "패키지명 검색", value: match?.name || "" });
+      const product = h("select", { required: true, "aria-label": "영향 제품" });
+      const state = h("select", null, [["needs_review", "확인 필요"], ["affected_confirmed", "영향 확인"], ["not_affected", "영향 없음 판정"]].map(([v, label]) => h("option", { value: v, selected: v === (match?.status || "needs_review") }, label)));
+      const evidence = h("textarea", { required: true, minlength: 8, maxlength: 2000, rows: 4, placeholder: "공식 보안 공지, CVE 적용 조건, 패키지 공급자 확인 등 근거" }, match?.evidence || "");
+      const conditions = h("textarea", { maxlength: 1000, rows: 2, placeholder: "제품·빌드·환경·완화 조건" }, match?.conditions || "");
+      const versions = h("textarea", { rows: 3, placeholder: "영향 확정 시 정확한 설치 버전을 쉼표로 입력" }, (match?.affected_versions || []).join(", "));
+      const versionField = field("영향 확정 버전", versions, "문자열 버전 비교로 자동 판단하지 않습니다. 설치 행과 정확히 일치하는 버전만 확정에 사용합니다.");
+      const msg = msgBox(); let dialog; let products = [];
+      const loadProducts = async () => {
+        const params = new URLSearchParams({ page: "1", page_size: "100" }); if (productSearch.value.trim()) params.set("q", productSearch.value.trim());
+        try {
+          const result = await api(`/v1/software-products?${params}`); products = result.items; clear(product).append(...products.map((p) => {
+            const key = `${p.source}\u001f${p.name}\u001f${p.arch}`;
+            return h("option", { value: key, selected: key === (match ? `${match.source}\u001f${match.name}\u001f${match.arch}` : "") }, `${p.product_name || p.name} · ${p.source} · ${p.arch || "-"}`);
+          }));
+        } catch (err) { msg.err(errMsg(err)); }
+      };
+      let timer; productSearch.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(loadProducts, 250); });
+      const syncVersions = () => { versionField[0].hidden = state.value !== "affected_confirmed"; versionField[1].hidden = state.value !== "affected_confirmed"; };
+      state.addEventListener("change", syncVersions); syncVersions();
+      const save = h("button", { type: "submit", class: "primary" }, "판정 저장");
+      const form = h("form", { class: "form", onsubmit: async (e) => {
+        e.preventDefault(); save.disabled = true; msg.clear();
+        const [source, name, arch] = product.value.split("\u001f");
+        const affected_versions = state.value === "affected_confirmed" ? [...new Set(versions.value.split(",").map((v) => v.trim()).filter(Boolean))] : [];
+        try {
+          await api("/v1/vulnerabilities/matches", { method: "PUT", body: JSON.stringify({ cve_id: cveId, source, name, arch, status: state.value,
+            evidence: evidence.value.trim(), conditions: conditions.value.trim(), affected_versions, expected_revision: currentRevision }) });
+          const refreshed = await api(`/v1/vulnerabilities/${enc(cveId)}`); Object.assign(item, refreshed); dialog.close("saved"); if (alive()) clear(root).append(draw());
+        } catch (err) { msg.err(err.status === 409 ? `${err.message} 최신 판정을 다시 불러오세요.` : errMsg(err)); save.disabled = false; }
+      } }, field("제품 검색", productSearch), field("설치 제품", product), field("판정", state), field("근거", evidence), field("적용 조건", conditions), versionField,
+        h("p", { class: "hint full" }, "정확한 설치 제품·아키텍처·버전과 근거를 관리자가 확인합니다. 이름 유사도만으로는 영향 확정하지 않습니다."),
+        h("div", { class: "full" }, msg.el), h("div", { class: "dialog-actions full" }, cancelDialog(() => dialog.close()), save));
+      dialog = editorDialog(match ? "CVE 제품 영향 판정 편집" : "CVE 제품 영향 판정 추가", form, opener);
+      loadProducts();
+    }
+    clear(root).append(draw()); return root;
   }
 
   // ---------- 설정 ----------
@@ -1761,6 +2558,20 @@
         h("div", { class: "toolbar" }, h("button", { class: "primary", type: "button", onclick: save }, "저장"), h("button", { type: "button", onclick: test }, "연결 테스트"), msg.el)));
   }
 
+  function setMenu(open) {
+    $top.classList.toggle("nav-open", open);
+    document.getElementById("nav-toggle").setAttribute("aria-expanded", String(open));
+  }
+  document.getElementById("nav-toggle").addEventListener("click", () => setMenu(!$top.classList.contains("nav-open")));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && $top.classList.contains("nav-open")) { setMenu(false); document.getElementById("nav-toggle").focus(); }
+  });
+  document.addEventListener("click", (e) => { if (!$top.contains(e.target)) setMenu(false); });
+
+  window.addEventListener("beforeunload", (e) => {
+    if (!assetDraftGuard?.isDirty()) return;
+    e.preventDefault(); e.returnValue = "";
+  });
   document.getElementById("logout").addEventListener("click", async (e) => {
     e.currentTarget.disabled = true;
     try { await api("/v1/auth/logout", { method: "POST" }); logout(); }

@@ -52,7 +52,7 @@ RD, ADM, ING = "rd", "adm", "ing"
 STATIC_ROUTES = [
     "#/overview", "#/kernels", "#/software", "#/software/openssl", "#/hosts", "#/assets", "#/assets/new", "#/containers",
     "#/containers/images", "#/containers/list", "#/events", "#/network", "#/network/ports", "#/network/ports/tcp/22",
-    "#/reports", "#/reports/facts", "#/enroll", "#/settings", "#/accounts",
+    "#/reports", "#/reports/facts", "#/enroll", "#/settings", "#/accounts", "#/users", "#/tokens",
 ]
 
 
@@ -117,7 +117,7 @@ class Site:
 
     def route(self, name: str) -> str:
         return {"host_detail": f"#/hosts/{self.unknown_kind_host}", "cluster": f"#/containers/clusters/{CLUSTER_A}",
-                "asset_edit": f"#/assets/{self.mismatch_asset}", "report": f"#/reports/{self.report_id}",
+                "asset_edit": f"#/assets/{self.mismatch_asset}/edit", "report": f"#/reports/{self.report_id}",
                 "big_host": f"#/hosts/{BIG_HOST}"}[name]
 
 
@@ -418,16 +418,15 @@ def test_no_horizontal_overflow_at_390_on_every_route(site, make_page):
     assert page.problems == []
 
 
-def test_mobile_header_nav_is_one_scrollable_row_and_logout_stays_reachable(site, make_page):
+def test_mobile_navigation_menu_and_logout_stay_reachable(site, make_page):
     page = make_page(width=390, height=844)
     open_route(page, site.base, "#/overview")
     nav = page.locator("#nav")
-    box = nav.evaluate("""(el) => { const links = [...el.querySelectorAll('a')].map((a) => a.getBoundingClientRect());
-        return { scrollW: el.scrollWidth, clientW: el.clientWidth, overflowX: getComputedStyle(el).overflowX,
-                 tops: [...new Set(links.map((r) => Math.round(r.top)))], maxH: Math.max(...links.map((r) => r.height)) }; }""")
-    assert box["scrollW"] > box["clientW"] and box["overflowX"] in ("auto", "scroll"), box     # 넘치는 메뉴는 가로로 스크롤
-    assert len(box["tops"]) == 1, box                                                          # 한 줄(줄바꿈으로 쌓이지 않음)
-    assert box["maxH"] < 60, box                                                               # 글자가 세로로 쌓이면 링크 높이가 커진다
+    expect(nav).to_be_hidden()
+    page.get_by_role("button", name="메뉴", exact=True).click()
+    expect(nav).to_be_visible()
+    assert nav.evaluate("el => el.scrollWidth <= el.clientWidth")
+    page.keyboard.press("Escape")
     logout = page.get_by_role("button", name="로그아웃").bounding_box()
     assert logout and 0 <= logout["x"] and logout["x"] + logout["width"] <= 390, logout
     page.get_by_role("button", name="로그아웃").click()
@@ -659,7 +658,9 @@ def test_hosts_table_rows_never_need_more_than_two_text_lines(site, make_page, w
     tall = sorted(((r["host"], r["height"]) for r in rows if r["height"] > limit), key=lambda t: -t[1])
     assert tall == [], f"{width}px: 두 줄({two_lines}px) 한도 {limit}px 를 넘는 행 {len(tall)}개 — 가장 큰 것 {tall[:3]}"
     if width >= 1360:
-        assert m["fits"], "데스크톱 폭에서 호스트 표가 가로로 넘친다 — 열 최소 너비가 너무 크다"
+        # 좌측 탐색으로 줄어든 콘텐츠 폭에서는 상세 열을 표 안에서 스크롤한다.
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        assert m["fits"] or page.locator(".scroll").first.evaluate("el => getComputedStyle(el).overflowX === 'auto'")
 
 
 # --------------------------------------------------------------------------- D. 필터 ↔ CSV ↔ URL
@@ -725,10 +726,10 @@ def test_csv_buttons_export_exactly_what_the_screen_filters(site, make_page):
     q = csv_query(page)
     assert q["proto"] == ["tcp"] and q["notable"] == ["true"] and q["q"] == ["22"] and q["format"] == ["csv"], q
 
-    # 변경 이력: 유형 + 이후 + 건수. 서울의 2020-01-01 00:00 은 2019-12-31T15:00Z — 시간대 없는 값을 보내면 서버가 UTC 로 읽어 9시간 어긋난다
+    # 변경 이력: 전체 내보내기는 화면 페이지 크기를 보내지 않고 필터만 보낸다. 서울 자정은 UTC 로 정규화한다.
     open_route(page, site.base, "#/events?type=kernel_changed&since=2020-01-01&limit=500")
     q = csv_query(page)
-    assert q == {"limit": ["500"], "type": ["kernel_changed"], "since": ["2019-12-31T15:00:00Z"], "format": ["csv"]}, q
+    assert q == {"type": ["kernel_changed"], "since": ["2019-12-31T15:00:00Z"], "format": ["csv"]}, q
     assert page.problems == []
 
 
@@ -806,8 +807,9 @@ def test_image_tag_links_and_cluster_scope_carry_through(site, make_page):
     settle(page)
     expand_groups(page)
     expect(page.locator(".chip", has_text="이미지: nginx:1.25")).to_be_visible()
-    images = page.locator("tbody tr td:nth-child(7)").all_inner_texts()               # 이미지 열(호스트·자산번호·구분·클러스터·파드·컨테이너 다음)
-    assert images and all("nginx:1.25" in i for i in images), images
+    images = page.locator(".server-group-body table").evaluate_all("tables => tables.flatMap(table => { const i = [...table.querySelectorAll('thead th')].findIndex(th => th.textContent.includes('이미지')); return [...table.querySelectorAll('tbody tr')].map(row => i < 0 ? '' : row.children[i]?.textContent.trim() || ''); })")
+    assert images and all("nginx:1.25" in i for i in images), {"images": images, "image_col": image_col,
+        "headers": page.locator("thead th").all_inner_texts(), "first_row": page.locator("tbody tr").first.locator("td").all_inner_texts()}
     page.locator(".chip", has_text="이미지:").get_by_role("button").click()
     assert hash_query(page) == {"active": ["1"]}
 
@@ -1243,7 +1245,7 @@ def test_mismatch_filter_and_banner_link(site, make_page):
     page = make_page()
     open_route(page, site.base, "#/assets")
     expect(page.locator("tbody tr")).to_have_count(total)
-    page.get_by_role("link", name="불일치 자산만 보기").click()
+    page.get_by_role("link", name="현재 조건의 불일치 보기").click()
     expect(page.get_by_label("상태 필터")).to_have_value("mismatch")
     rows = page.locator("tbody tr")
     expect(rows).to_have_count(mismatched)
@@ -1308,6 +1310,7 @@ def test_register_from_host_requires_an_explicit_kind_validates_inline_and_retur
         page.get_by_role("button", name="저장", exact=True).dblclick()
         expect(page).to_have_url(re.compile(re.escape(f"#/hosts/{host}") + "$"))       # 저장 뒤 온 곳(호스트 상세)으로
         expect(page.locator("#app h1").first).to_be_visible()
+        expect(page.get_by_role("status").filter(has_text="자산 정보를 저장했습니다.")).to_be_visible()
         assert len(created) == 1, created
         expect(page.locator(".panel", has_text="자산번호")).to_contain_text("UX-TEST-0001")
     finally:
@@ -1347,6 +1350,7 @@ def test_asset_edit_returns_to_the_list_it_came_from(site, make_page):
     # 같은 자산 링크가 호스트 목록에서는 호스트 목록으로 돌려보낸다
     open_route(page, site.base, "#/hosts?status=error")
     page.locator("tbody tr").first.get_by_role("link", name=re.compile(r"^[VP]-\d+")).click()
+    page.get_by_role("link", name="자산 정보 편집").click()
     expect(page.get_by_role("button", name="저장", exact=True)).to_be_visible()
     expect(page.get_by_role("link", name="← 돌아가기")).to_be_visible()
     page.get_by_role("link", name="← 돌아가기").click()
@@ -1500,7 +1504,7 @@ def test_malicious_agent_strings_stay_text_on_every_screen_that_shows_them(site,
     assert shown >= 6, shown                                                               # 악성 문자열이 실제로 화면에 나온 경로가 충분히 있었다
     # 자산 비고(입력란 값)·이벤트 호스트 선택(datalist)·칩에도 글자로만 들어간다
     note_asset = next(r for r in call(site.base, "/v1/assets") if r["asset"] and payload in r["asset"]["note"])["asset"]["id"]
-    open_route(page, site.base, f"#/assets/{note_asset}")
+    open_route(page, site.base, f"#/assets/{note_asset}/edit")
     expect(page.get_by_label("비고")).to_have_value(payload)
     open_route(page, site.base, f"#/events?host={xss_host}")
     expect(page.get_by_label("호스트 (이름으로 선택)")).to_have_value(payload)
@@ -1675,7 +1679,8 @@ def test_admin_assigns_permissions_and_issues_and_revokes_jwt(site,make_page,wid
     username=f'ui-managed-{width}'
     password='ui-password-1234'
     page=make_page(width=width)
-    open_route(page,site.base,'#/accounts')
+    open_route(page,site.base,'#/users')
+    page.get_by_role('button',name='사용자 추가',exact=True).click()
     page.get_by_label('새 사용자 ID',exact=True).fill(username)
     page.get_by_label('초기 비밀번호',exact=True).fill(password)
     page.get_by_role('button',name='사용자 생성',exact=True).click()
@@ -1686,9 +1691,12 @@ def test_admin_assigns_permissions_and_issues_and_revokes_jwt(site,make_page,wid
     page.get_by_role('button',name='변경 적용',exact=True).click()
     expect(row.get_by_role('cell',name='관리자',exact=True)).to_be_visible()
     user=next(u for u in call(site.base,'/v1/users') if u['username']==username)
+    open_route(page,site.base,'#/tokens')
+    page.get_by_role('button',name='API 토큰 발급',exact=True).click()
     name='<img src=x onerror=alert(1)> '+str(width)
     page.get_by_label('토큰 이름',exact=True).fill(name)
     page.get_by_label('토큰 사용자',exact=True).select_option(user['id'])
+    page.get_by_label('만료 기간',exact=True).select_option('custom')
     page.get_by_label('유효 시간(시간)',exact=True).fill('1')
     page.get_by_role('button',name='JWT 발급',exact=True).click()
     jwt_box=page.get_by_label('발급된 JWT',exact=True)
@@ -1696,15 +1704,17 @@ def test_admin_assigns_permissions_and_issues_and_revokes_jwt(site,make_page,wid
     token=jwt_box.input_value()
     assert token.count('.')==2
     assert page.request.get(site.base+'/v1/hosts',headers={'Authorization':'Bearer '+token}).status==200
+    page.get_by_role('button',name='닫기',exact=True).click()
     token_row=page.locator('tr').filter(has=page.get_by_role('cell',name=name,exact=True)).first
     expect(token_row).to_be_visible()
     token_row.get_by_role('button',name='회수',exact=True).click()
+    page.get_by_role('dialog').get_by_role('button',name='토큰 회수',exact=True).click()
     expect(token_row.get_by_role('cell',name='회수됨',exact=True)).to_be_visible()
     assert page.request.get(site.base+'/v1/hosts',headers={'Authorization':'Bearer '+token}).status==401
     assert page.locator('#app img').count()==0
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     page.reload()
-    expect(page.get_by_role('heading',name='API 토큰(JWT) 발급·회수',exact=True)).to_be_visible()
+    expect(page.get_by_role('heading',name='API 토큰',exact=True)).to_be_visible()
     expect(page.get_by_label('발급된 JWT',exact=True)).to_have_count(0)
     assert token not in page.locator('#app').inner_text()
     assert page.problems==[]
@@ -1713,15 +1723,156 @@ def test_admin_assigns_permissions_and_issues_and_revokes_jwt(site,make_page,wid
 def test_jwt_revocation_failure_can_be_retried(site,make_page):
     created=call(site.base,'/v1/tokens',method='POST',body={'name':'ui-retry','role':'ingest','expires_hours':1})
     page=make_page()
-    open_route(page,site.base,'#/accounts')
+    open_route(page,site.base,'#/tokens')
     row=page.locator('tr').filter(has=page.get_by_role('cell',name='ui-retry',exact=True)).first
     button=row.get_by_role('button',name='회수',exact=True)
     pattern='**/v1/tokens/'+created['id']
     page.route(pattern,lambda route:route.fulfill(status=503,json={'detail':'일시적 실패'}))
     button.click()
+    retry=page.get_by_role('dialog').get_by_role('button',name='토큰 회수',exact=True)
+    retry.click()
     expect(page.get_by_role('alert').filter(has_text='일시적 실패')).to_be_visible()
-    expect(button).to_be_enabled()
+    expect(retry).to_be_enabled()
     page.unroute(pattern)
-    button.click()
+    retry.click()
     expect(row.get_by_role('cell',name='회수됨',exact=True)).to_be_visible()
     assert not any(p.startswith('pageerror:') for p in page.problems)
+
+
+def test_console_navigation_groups_and_mobile_menu(site,make_page):
+    desktop=make_page(width=1024)
+    open_route(desktop,site.base,'#/overview',expand_inventory=False)
+    nav=desktop.locator('#nav')
+    assert nav.evaluate('el => el.scrollWidth <= el.clientWidth')
+    for name in ('사용자 관리','API 토큰','설정'):
+        expect(nav.get_by_role('link',name=name,exact=True)).to_be_visible()
+    phone=make_page(width=390)
+    open_route(phone,site.base,'#/overview',expand_inventory=False)
+    menu=phone.get_by_role('button',name='메뉴',exact=True)
+    expect(menu).to_have_attribute('aria-expanded','false')
+    expect(phone.locator('#nav')).to_be_hidden()
+    menu.click()
+    expect(menu).to_have_attribute('aria-expanded','true')
+    phone.locator('#nav').get_by_role('link',name='API 토큰',exact=True).click()
+    expect(phone.get_by_role('heading',name='API 토큰',exact=True)).to_be_visible()
+    expect(phone.locator('#nav')).to_be_hidden()
+    menu.click();phone.keyboard.press('Escape')
+    expect(menu).to_have_attribute('aria-expanded','false')
+    expect(menu).to_be_focused()
+
+
+def test_console_server_rows_compact_and_search_keeps_expansion(site,make_page):
+    page=make_page(width=390)
+    open_route(page,site.base,'#/software?q=open',expand_inventory=False)
+    group=page.locator('details.server-group').first
+    expect(group).to_be_visible()
+    assert group.bounding_box()['height']<=56
+    owner=group.get_attribute('data-host-id')
+    assert owner not in group.locator('summary').inner_text()
+    group.locator('summary').click();expect(group.locator('table')).to_be_visible()
+    with page.expect_response(lambda r:'/v1/software-hosts?' in r.url):
+        page.get_by_label('패키지 이름 검색',exact=True).fill('openssl')
+    expect(page.locator(f'details.server-group[data-host-id="{owner}"]')).to_have_attribute('open','')
+    expect(page.locator(f'details.server-group[data-host-id="{owner}"] table')).to_be_visible()
+    page.reload()
+    expect(page.locator('details.server-group').first).to_be_visible()
+    assert page.locator('details.server-group[open]').count()==0
+
+
+def test_console_overview_prioritizes_actions_over_distribution(site,make_page):
+    page=make_page()
+    open_route(page,site.base,'#/overview',expand_inventory=False)
+    expect(page.locator('.stat-strip .card')).to_have_count(4)
+    attention=page.get_by_role('heading',name='우선 확인',exact=True)
+    changes=page.get_by_role('heading',name='최근 변경',exact=True)
+    kernels=page.get_by_role('heading',name='실행 중 커널 분포',exact=True)
+    assert attention.bounding_box()['y']<changes.bounding_box()['y']<kernels.bounding_box()['y']
+
+
+def test_console_user_edit_cancel_dirty_save_and_preserved_search(site,make_page):
+    created=call(site.base,'/v1/users',method='POST',body={'username':'ux-editor','password':'ux-password-1234','role':'read'})
+    page=make_page()
+    open_route(page,site.base,'#/users')
+    expect(page.get_by_label('현재 비밀번호',exact=True)).to_have_count(0)
+    page.get_by_label('사용자 검색',exact=True).fill('ux-editor')
+    row=page.locator('tr').filter(has=page.get_by_role('cell',name='ux-editor',exact=True))
+    row.get_by_role('button',name='권한·계정 변경').click()
+    dialog=page.get_by_role('dialog')
+    save=dialog.get_by_role('button',name='변경 적용',exact=True)
+    expect(save).to_be_disabled()
+    dialog.get_by_label('계정 활성',exact=True).uncheck()
+    expect(save).to_be_enabled()
+    dialog.get_by_role('button',name='취소',exact=True).click()
+    expect(dialog).to_have_count(0)
+    assert next(u for u in call(site.base,'/v1/users') if u['id']==created['id'])['active']
+    row.get_by_role('button',name='권한·계정 변경').click()
+    dialog.get_by_label('계정 활성',exact=True).uncheck();save.click()
+    expect(dialog).to_have_count(0)
+    expect(page.get_by_label('사용자 검색',exact=True)).to_have_value('ux-editor')
+    expect(row.get_by_role('cell',name='비활성',exact=True)).to_be_visible()
+    expect(page.get_by_role('status').filter(has_text='변경했습니다')).to_be_visible()
+
+
+def test_console_token_confirmation_and_nonsecret_draft_survives_navigation(site,make_page):
+    created=call(site.base,'/v1/tokens',method='POST',body={'name':'ux-protected','role':'ingest','expires_hours':1})
+    page=make_page();open_route(page,site.base,'#/tokens')
+    requests=[];page.on('request',lambda r:requests.append(r.method+' '+urlparse(r.url).path))
+    row=page.locator('tr').filter(has=page.get_by_role('cell',name='ux-protected',exact=True))
+    row.get_by_role('button',name='회수',exact=True).click()
+    dialog=page.get_by_role('dialog')
+    expect(dialog).to_contain_text('ux-protected')
+    expect(dialog).to_contain_text('수집')
+    assert not any(r.startswith('DELETE ') for r in requests)
+    dialog.get_by_role('button',name='취소',exact=True).click()
+    assert not any(r.startswith('DELETE ') for r in requests)
+    row.get_by_role('button',name='회수',exact=True).click()
+    dialog.get_by_role('button',name='토큰 회수',exact=True).click()
+    expect(dialog).to_have_count(0)
+    expect(row.get_by_role('cell',name='회수됨',exact=True)).to_be_visible()
+    page.get_by_role('button',name='API 토큰 발급',exact=True).click()
+    dialog=page.get_by_role('dialog');dialog.get_by_label('토큰 이름',exact=True).fill('unfinished-token')
+    page.goto(page.url.split('#')[0]+'#/users')
+    expect(page.get_by_role('heading',name='사용자 관리',exact=True)).to_be_visible()
+    page.goto(page.url.split('#')[0]+'#/tokens')
+    page.get_by_role('button',name='API 토큰 발급',exact=True).click()
+    expect(page.get_by_role('dialog').get_by_label('토큰 이름',exact=True)).to_have_value('unfinished-token')
+
+
+def test_console_user_draft_never_retains_password_and_escape_cancels(site,make_page):
+    page=make_page();open_route(page,site.base,'#/users')
+    create=page.get_by_role('button',name='사용자 추가',exact=True)
+    create.click();dialog=page.get_by_role('dialog')
+    dialog.get_by_label('새 사용자 ID',exact=True).fill('draft-user')
+    dialog.get_by_label('초기 권한',exact=True).select_option('admin')
+    dialog.get_by_label('초기 비밀번호',exact=True).fill('private-password-1234')
+    page.goto(page.url.split('#')[0]+'#/tokens')
+    expect(page.get_by_role('heading',name='API 토큰',exact=True)).to_be_visible()
+    page.goto(page.url.split('#')[0]+'#/users')
+    create.click()
+    expect(dialog.get_by_label('새 사용자 ID',exact=True)).to_have_value('draft-user')
+    expect(dialog.get_by_label('초기 권한',exact=True)).to_have_value('admin')
+    expect(dialog.get_by_label('초기 비밀번호',exact=True)).to_have_value('')
+    page.keyboard.press('Escape')
+    expect(dialog).to_have_count(0);expect(create).to_be_focused()
+    create.click()
+    expect(dialog.get_by_label('새 사용자 ID',exact=True)).to_have_value('')
+    expect(dialog.get_by_label('초기 권한',exact=True)).to_have_value('read')
+    assert 'private-password-1234' not in str(page.evaluate('({...sessionStorage})'))
+
+
+def test_console_token_filter_stays_after_revoke_and_reload(site,make_page):
+    call(site.base,'/v1/tokens',method='POST',body={'name':'filter-preserved','role':'ingest','expires_hours':1})
+    page=make_page();open_route(page,site.base,'#/tokens')
+    page.get_by_label('토큰 검색',exact=True).fill('filter-preserved')
+    page.get_by_label('토큰 상태',exact=True).select_option('유효')
+    row=page.locator('tr').filter(has=page.get_by_role('cell',name='filter-preserved',exact=True))
+    row.get_by_role('button',name='회수',exact=True).click()
+    page.get_by_role('dialog').get_by_role('button',name='토큰 회수',exact=True).click()
+    expect(page.get_by_role('dialog')).to_have_count(0)
+    expect(row).to_have_count(0)
+    expect(page.get_by_label('토큰 검색',exact=True)).to_have_value('filter-preserved')
+    expect(page.get_by_label('토큰 상태',exact=True)).to_have_value('유효')
+    assert hash_query(page)=={'q':['filter-preserved'],'status':['유효']}
+    page.reload();expect(page.get_by_label('토큰 상태',exact=True)).to_have_value('유효')
+    page.get_by_label('토큰 상태',exact=True).select_option('전체')
+    expect(row.get_by_role('cell',name='회수됨',exact=True)).to_be_visible()

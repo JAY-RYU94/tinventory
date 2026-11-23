@@ -1,8 +1,10 @@
 """자산 대장(웹에서 관리) + 수집 호스트 연결 + 기존 목록에 붙는 자산 열 + 장비 정보 적재."""
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, inspect, text
 
 from swinventory.server.app import ApiSettings, create_app
+from swinventory.server.timeutil import normalize_ts
 from tests.server.conftest import T0, dpkg, hw, iface, make_snapshot, port
 
 ING, RD, AD = {"Authorization": "Bearer ing-tok"}, {"Authorization": "Bearer read-tok"}, {"Authorization": "Bearer adm-tok"}
@@ -104,6 +106,72 @@ def test_create_update_delete_roundtrip(client):
     assert client.get(f"/v1/assets/{a['id']}", headers=RD).status_code == 404
     assert client.delete(f"/v1/assets/{a['id']}", headers=AD).status_code == 404
     assert client.put(f"/v1/assets/{a['id']}", json={"asset_no": "A-1", "kind": "physical"}, headers=AD).status_code == 404
+
+
+def test_asset_revision_rejects_a_stale_full_form_update(client):
+    created = add(client, asset_no="REV-1", note="기존 값").json()
+    assert created["revision"] == 1
+    current = client.put(f"/v1/assets/{created['id']}", headers=AD, json={
+        "asset_no": "REV-1", "kind": "physical", "note": "다른 담당자가 바꿈", "expected_revision": 1})
+    assert current.status_code == 200 and current.json()["revision"] == 2
+    stale = client.put(f"/v1/assets/{created['id']}", headers=AD, json={
+        "asset_no": "REV-1", "kind": "physical", "note": "오래된 폼 값", "expected_revision": 1})
+    assert stale.status_code == 409
+    latest = client.get(f"/v1/assets/{created['id']}", headers=RD).json()
+    assert latest["asset"]["note"] == "다른 담당자가 바꿈" and latest["asset"]["revision"] == 2
+
+
+def test_registered_asset_card_scope_matches_its_summary_count(client):
+    seed_hosts(client)
+    add(client, asset_no="REG-1", serial="SN-ESX01")
+    add(client, asset_no="REG-2", hostname="ghost")
+    summary = client.get("/v1/assets/summary", headers=RD).json()
+    registered = rows(client, status="registered")
+    assert len(registered) == summary["assets"] == 2
+    assert all(row["asset"] is not None for row in registered)
+
+
+def test_existing_asset_table_gets_revision_without_losing_rows(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-assets.db'}")
+    with engine.begin() as conn:
+        conn.execute(text("""CREATE TABLE assets (
+            id INTEGER PRIMARY KEY, asset_no VARCHAR(64) NOT NULL, asset_no_key VARCHAR(64) NOT NULL,
+            kind VARCHAR(16) NOT NULL, serial VARCHAR(128) NOT NULL, hostname VARCHAR(255) NOT NULL,
+            domain VARCHAR(255) NOT NULL, ip VARCHAR(45) NOT NULL, parent_asset_id INTEGER,
+            host_id VARCHAR(128), note VARCHAR(500) NOT NULL, created_at VARCHAR(32) NOT NULL,
+            updated_at VARCHAR(32) NOT NULL)"""))
+        conn.execute(text("""INSERT INTO assets (id, asset_no, asset_no_key, kind, serial, hostname, domain, ip,
+            parent_asset_id, host_id, note, created_at, updated_at)
+            VALUES (1, 'LEGACY-1', 'legacy-1', 'virtual', '', 'vm1', '', '', NULL, NULL, '유지',
+                    '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z')"""))
+    from swinventory.server.repo.sql import SqlInventoryRepository
+    repo = SqlInventoryRepository(engine)
+    assert "revision" in {column["name"] for column in inspect(engine).get_columns("assets")}
+    row = repo.get_asset(1)
+    assert row["asset_no"] == "LEGACY-1" and row["note"] == "유지" and row["revision"] == 1
+    engine.dispose()
+
+
+def test_software_collector_freshness_keeps_last_success_across_failure(client):
+    push(client, make_snapshot(host_id="fresh-1", packages=[dpkg("openssl", "3.0.2")]))
+    first = client.get("/v1/hosts/fresh-1", headers=RD).json()
+    status = next(r for r in first["source_freshness"] if r["source"] == "software.dpkg")
+    assert status["state"] == "ok" and status["last_success_at"] == normalize_ts(T0)
+
+    failed_at = T0.replace(hour=1)
+    push(client, make_snapshot(host_id="fresh-1", at=failed_at, packages=[], collected=["os", "kernel"],
+                               errors={"software.dpkg": "package manager unavailable"}))
+    failed = client.get("/v1/hosts/fresh-1", headers=RD).json()
+    status = next(r for r in failed["source_freshness"] if r["source"] == "software.dpkg")
+    assert status["state"] == "failed" and status["last_success_at"] == normalize_ts(T0)
+    assert status["last_attempt_at"] == normalize_ts(failed_at) and "unavailable" in status["last_error"]
+    assert [(p["name"], p["version"]) for p in failed["packages"]] == [("openssl", "3.0.2")]
+
+    recovered_at = T0.replace(hour=2)
+    push(client, make_snapshot(host_id="fresh-1", at=recovered_at, packages=[dpkg("openssl", "3.0.2")]))
+    recovered = client.get("/v1/hosts/fresh-1", headers=RD).json()
+    status = next(r for r in recovered["source_freshness"] if r["source"] == "software.dpkg")
+    assert status["state"] == "ok" and status["last_success_at"] == normalize_ts(recovered_at) and status["last_error"] == ""
 
 
 @pytest.mark.parametrize("patch", [

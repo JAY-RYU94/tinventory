@@ -38,6 +38,9 @@ class InventoryRepository(ABC):
                         collected: list[str], errors: dict[str, str]) -> int: ...
 
     @abstractmethod
+    def record_source_results(self, host_id: str, collected: Iterable[str], errors: dict[str, str], at: str) -> None: ...
+
+    @abstractmethod
     def synced_sources(self, host_id: str) -> set[str]: ...
 
     @abstractmethod
@@ -153,7 +156,11 @@ class InventoryRepository(ABC):
 
     @abstractmethod
     def list_events(self, host_id: str | None = None, event_type: str | None = None,
-                    since: str | None = None, limit: int = 100) -> list[dict[str, Any]]: ...
+                    since: str | None = None, limit: int | None = 100, offset: int = 0) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    def count_events(self, host_id: str | None = None, event_type: str | None = None,
+                     since: str | None = None) -> int: ...
 
     @abstractmethod
     def package_version_spread(self, min_versions: int = 3, limit: int = 20) -> list[dict[str, Any]]:
@@ -188,11 +195,77 @@ class InventoryRepository(ABC):
         """자산번호(대소문자 무시)·명시 연결 host_id 가 이미 있으면 ConflictError."""
 
     @abstractmethod
-    def update_asset(self, asset_id: int, values: dict[str, Any], at: str) -> bool:
-        """전체 교체. 없으면 False. 유일 제약 위반은 ConflictError."""
+    def update_asset(self, asset_id: int, values: dict[str, Any], at: str, expected_revision: int | None = None) -> bool:
+        """전체 교체. 없으면 False. stale revision·유일 제약 위반은 ConflictError."""
 
     @abstractmethod
     def delete_asset(self, asset_id: int) -> bool: ...
+
+    # --- 업무용 SW 분류·승인 요청 ---------------------------------------
+    @abstractmethod
+    def list_software_products(self, q: str, category: str | None, offset: int, limit: int) -> tuple[int, list[dict[str, Any]]]: ...
+
+    @abstractmethod
+    def get_software_classification(self, source: str, name: str, arch: str) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def set_software_classification(self, source: str, name: str, arch: str, values: dict[str, Any],
+                                    actor_id: str, at: str, expected_revision: int | None) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def software_classification_history(self, source: str, name: str, arch: str) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    def get_software_request_scope(self, user_id: str) -> list[str]: ...
+
+    @abstractmethod
+    def replace_software_request_scope(self, user_id: str, host_ids: list[str], actor_id: str, at: str) -> None: ...
+
+    @abstractmethod
+    def software_request_scope_history(self, user_id: str) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    def software_product_installed(self, source: str, name: str, arch: str, version: str, host_ids: list[str]) -> bool: ...
+
+    @abstractmethod
+    def create_software_request(self, values: dict[str, Any], host_ids: list[str], actor_id: str, at: str) -> int: ...
+
+    @abstractmethod
+    def list_software_requests(self, *, requester_id: str | None, status: str | None, q: str,
+                               unassigned: bool, overdue_before: str | None, offset: int, limit: int) -> tuple[int, list[dict[str, Any]]]: ...
+
+    @abstractmethod
+    def get_software_request(self, request_id: int) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def update_software_request(self, request_id: int, expected_revision: int, values: dict[str, Any],
+                                actor_id: str, action: str, reason: str, detail: dict[str, Any],
+                                at: str, approvals: list[dict[str, Any]] | None = None,
+                                revoke_approvals: bool = False) -> None: ...
+
+    @abstractmethod
+    def list_vulnerabilities(self, *, q: str, kev_only: bool, impact_status: str | None,
+                             offset: int, limit: int, host_id: str | None = None) -> tuple[int, list[dict[str, Any]]]: ...
+
+    @abstractmethod
+    def vulnerability_detail(self, cve_id: str) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def update_vulnerability_match(self, cve_id: str, source: str, name: str, arch: str, values: dict[str, Any],
+                                   actor_id: str, at: str, expected_revision: int | None) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def vulnerability_feed_status(self) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    def replace_cisa_kev(self, values: list[dict[str, Any]], catalog_version: str, fetched_at: str) -> None: ...
+
+    @abstractmethod
+    def upsert_nvd_vulnerabilities(self, values: list[dict[str, Any]], fetched_at: str) -> None: ...
+
+    @abstractmethod
+    def record_vulnerability_feed(self, source: str, state: str, attempted_at: str, succeeded_at: str | None,
+                                  error: str, data_version: str, records: int) -> None: ...
 
 
     # --- 사용자·JWT: 상태 변경은 auth_lock 안에서 직렬화한다 ---

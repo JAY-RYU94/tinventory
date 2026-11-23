@@ -29,14 +29,19 @@ from swinventory.server.api import network as network_api
 from swinventory.server.api import read as read_api
 from swinventory.server.api import reports as reports_api
 from swinventory.server.api import settings as settings_api
+from swinventory.server.api import software_requests as software_requests_api
+from swinventory.server.api import vulnerabilities as vulnerabilities_api
 from swinventory.server.api import whoami as whoami_api
 from swinventory.server.assets import AssetService
 from swinventory.server.auth import ApiSettings, Authenticator
+from swinventory.server.mcp import install_mcp
+from swinventory.server.openapi import configure_openapi
 from swinventory.server.middleware import BodySizeLimitMiddleware, RejectNulMiddleware, SecurityHeadersMiddleware
 from swinventory.server.policy import KernelPolicyStore
 from swinventory.server.repo.base import InventoryRepository
 from swinventory.server.secrets import SecretBox
 from swinventory.server.services.ingest import IngestService
+from swinventory.server.vulnerabilities import VulnerabilityFeedService
 
 __all__ = ["ApiSettings", "create_app"]
 
@@ -79,9 +84,18 @@ def create_app(repo: InventoryRepository, settings: ApiSettings,
     accounts = Accounts(repo, clock, box, env)
     auth = Authenticator(settings, accounts)
     accounts.legacy_roles = auth.static_roles_of
-    app = InventoryApp(title="swinventory", version="0.1.0")
+    app = InventoryApp(title="swinventory", version="0.1.0",
+        description="서버·소프트웨어·네트워크·컨테이너 인벤토리 API. "
+        "로그인은 /v1/auth/login, 인증은 Authorize에 Bearer 토큰을 입력하세요. "
+        "MCP 조회 연동 주소는 /mcp 입니다.",
+        swagger_ui_parameters={"persistAuthorization": False})
     app.max_body_bytes = settings.max_body_bytes
     app.add_middleware(SecurityHeadersMiddleware)
+
+    def include_router(router):
+        # 포함 전에 설정해야 지연 라우터를 쓰는 FastAPI에서도 문서 계약이 유지된다.
+        configure_openapi(router)
+        app.include_router(router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, exc):
@@ -101,19 +115,25 @@ def create_app(repo: InventoryRepository, settings: ApiSettings,
             raise HTTPException(503, "unhealthy") from None
         return {"status": "ok"}
 
-    app.include_router(ingest_api.build_router(IngestService(repo, clock), auth.require("ingest")))
-    app.include_router(whoami_api.build_router(auth.caller_role()))
-    app.include_router(accounts_api.build_router(accounts, auth.require("read"), auth.require("admin")))
+    include_router(ingest_api.build_router(IngestService(repo, clock), auth.require("ingest")))
+    include_router(whoami_api.build_router(auth.caller_role()))
+    include_router(accounts_api.build_router(accounts, auth.require("read"), auth.require("admin")))
     asset_service = AssetService(repo)
-    app.include_router(read_api.build_router(
+    include_router(read_api.build_router(
         repo, auth.require("read"), auth.require("admin"), clock, settings.stale_after_hours, policy_store.load, asset_service))
-    app.include_router(containers_api.build_router(repo, asset_service, auth.require("read"), auth.require("admin"), clock))
-    app.include_router(assets_api.build_router(repo, asset_service, auth.require("read"), auth.require("admin"), clock))
+    include_router(containers_api.build_router(repo, asset_service, auth.require("read"), auth.require("admin"), clock))
+    include_router(assets_api.build_router(repo, asset_service, auth.require("read"), auth.require("admin"), clock))
     catalog = AgentCatalog(agent_dir if agent_dir is not None else env.get("SWINV_AGENT_DIR"))
-    app.include_router(enroll_api.build_router(catalog, settings.ingest_tokens, settings.public_url, auth.require("read"), auth.require("admin")))
-    app.include_router(network_api.build_router(repo, auth.require("read"), asset_service))
-    app.include_router(settings_api.build_router(auth.require("read"), auth.require("admin"), policy_store, ai_store, reports))
-    app.include_router(reports_api.build_router(repo, auth.require("read"), auth.require("admin"), reports))
+    include_router(enroll_api.build_router(catalog, settings.ingest_tokens, settings.public_url, auth.require("read"), auth.require("admin")))
+    include_router(network_api.build_router(repo, auth.require("read"), asset_service))
+    include_router(settings_api.build_router(auth.require("read"), auth.require("admin"), policy_store, ai_store, reports))
+    include_router(reports_api.build_router(repo, auth.require("read"), auth.require("admin"), reports))
+    include_router(software_requests_api.build_router(repo, accounts, auth.require("read"), auth.require("request"),
+        auth.require("admin"), auth.caller_role(), clock))
+    vulnerability_feeds = VulnerabilityFeedService(repo, clock, nvd_api_key=env.get("SWINV_NVD_API_KEY"))
+    include_router(vulnerabilities_api.build_router(repo, accounts, vulnerability_feeds,
+        auth.require("read"), auth.require("admin"), clock))
+    install_mcp(app, auth, settings.public_url)
     # 화면(정적 파일). API 라우트 뒤에 마운트해야 /v1·/healthz·/docs 가 가려지지 않는다.
     app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
     return app

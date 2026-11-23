@@ -62,6 +62,7 @@ class IngestService:
             if not is_new and collected_at < host.last_snapshot_at:
                 return IngestResult("stale")  # 늦게 도착한 옛 스냅샷은 보관만 한다
 
+            repo.record_source_results(snap.host_id, snap.collected, snap.errors, collected_at)
             events = self._sync(snap, host, is_new, received)
             self._update_host(snap, host, collected_at, received)
             repo.add_events(snap.host_id, snapshot_id, collected_at, events)

@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import JSONResponse
 
 from swinventory.common.versioning import version_key
 from swinventory.server.api.csvutil import csv_response
@@ -175,15 +176,27 @@ def build_router(repo: InventoryRepository, require_read: Callable[..., None],
 
     @router.get("/events", dependencies=read, response_model=None)
     def events(host: str | None = None, type: str | None = None, since: str | None = None,
-               limit: int = Query(100, ge=1, le=1000), fmt: str = _FORMAT) -> Response | list[dict]:
+               limit: int = Query(100, ge=1, le=1000), page: int | None = Query(None, ge=1),
+               page_size: int | None = Query(None, ge=1, le=500), fmt: str = _FORMAT) -> Response | list[dict] | dict:
         try:
             since_ts = normalize_ts(since) if since else None
         except ValueError:
             raise HTTPException(422, "since 는 ISO-8601 형식이어야 한다") from None
-        rows = assets.annotate(repo.list_events(host_id=host, event_type=type, since=since_ts, limit=limit))
         if fmt == "csv":
-            return csv_response(rows, ["id", "occurred_at", "hostname", "host_id", "asset_no", "kind", "event_type",
-                                       "subject_key", "old_value", "new_value"], "events.csv")
-        return rows
+            rows = assets.annotate(repo.list_events(host_id=host, event_type=type, since=since_ts, limit=None))
+            response = csv_response(rows, ["id", "occurred_at", "hostname", "host_id", "asset_no", "kind", "event_type",
+                                           "subject_key", "old_value", "new_value"], "events.csv")
+            response.headers["X-Total-Count"] = str(len(rows))
+            return response
+        total = repo.count_events(host_id=host, event_type=type, since=since_ts)
+        if page is not None or page_size is not None:
+            requested_page = page or 1
+            requested_size = page_size or min(limit, 200)
+            rows = assets.annotate(repo.list_events(host_id=host, event_type=type, since=since_ts,
+                limit=requested_size, offset=(requested_page - 1) * requested_size))
+            return {"items": rows, "total": total, "page": requested_page, "page_size": requested_size}
+        rows = assets.annotate(repo.list_events(host_id=host, event_type=type, since=since_ts, limit=limit))
+        return JSONResponse(content=rows, headers={"X-Total-Count": str(total),
+            "X-Result-Truncated": str(total > limit).lower()})
 
     return router

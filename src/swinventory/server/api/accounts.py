@@ -19,7 +19,7 @@ class Login(Input):
 class NewUser(Input):
     username: str = Field(min_length=3, max_length=64)
     password: SecretStr
-    role: Literal["read", "admin"] = "read"
+    role: Literal["read", "request", "admin"] = "read"
 
 
 class ChangeUser(Input):
@@ -30,7 +30,7 @@ class ChangeUser(Input):
 
 class NewToken(Input):
     name: str = Field(min_length=1, max_length=100)
-    role: Literal["ingest", "read", "admin"] = "read"
+    role: Literal["ingest", "read", "request", "admin"] = "read"
     user_id: str | None = Field(None, max_length=32)
     expires_hours: int = Field(24, ge=1, le=720)
 

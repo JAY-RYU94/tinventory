@@ -158,7 +158,11 @@ class Accounts:
         principal = self.principal(token)
         if not principal:
             return set()
-        return {"admin", "read"} if principal["role"] == "admin" else {principal["role"]}
+        if principal["role"] == "admin":
+            return {"admin", "read"}
+        if principal["role"] == "request":
+            return {"request", "read"}
+        return {principal["role"]}
 
     @contextmanager
     def admin(self, token: str):
@@ -170,7 +174,8 @@ class Accounts:
 
     def issue_api(self, name: str, role: str, user_id: str | None, hours: int) -> dict:
         user = self.repo.get_user(user_id) if user_id else None
-        if role != "ingest" and (not user or not user["active"] or (role == "admin" and user["role"] != "admin")):
+        if role != "ingest" and (not user or not user["active"] or (role == "admin" and user["role"] != "admin")
+                                  or (role == "request" and user["role"] not in ("request", "admin"))):
             raise HTTPException(422, "활성 사용자를 선택하고 사용자 권한 범위 안에서 발급하세요.")
         if role == "ingest" and user_id:
             raise HTTPException(422, "수집 토큰은 사용자 없이 발급하세요.")

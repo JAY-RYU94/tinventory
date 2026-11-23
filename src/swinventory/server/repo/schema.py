@@ -40,6 +40,18 @@ host_sources = Table(
     PrimaryKeyConstraint("host_id", "source"),
 )
 
+# collector 단위 수집 신선도. 실패 시 last_success_at 과 현재 설치 인벤토리는 유지한다.
+host_source_freshness = Table(
+    "host_source_freshness", metadata,
+    Column("host_id", String(128), ForeignKey("hosts.host_id"), nullable=False),
+    Column("source", String(64), nullable=False),
+    Column("last_success_at", _TS, nullable=True),
+    Column("last_attempt_at", _TS, nullable=False),
+    Column("state", String(16), nullable=False),
+    Column("last_error", Text, nullable=False, default=""),
+    PrimaryKeyConstraint("host_id", "source"),
+)
+
 snapshots = Table(
     "snapshots", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
@@ -180,6 +192,7 @@ assets = Table(
     Column("note", String(500), nullable=False, default=""),
     Column("created_at", _TS, nullable=False),
     Column("updated_at", _TS, nullable=False),
+    Column("revision", Integer, nullable=False, server_default="1"),
 )
 Index("ix_assets_parent", assets.c.parent_asset_id)
 
@@ -231,3 +244,130 @@ access_tokens = Table("access_tokens", metadata,
     Column("revoked", Boolean, nullable=False))
 login_attempts = Table("login_attempts", metadata,
     Column("key", String(64), primary_key=True), Column("started_at", Integer, nullable=False), Column("count", Integer, nullable=False))
+
+# 업무용 소프트웨어 분류는 수집 source 로 추측하지 않는다. 미분류 제품은 needs_review 로 남긴다.
+software_classifications = Table("software_classifications", metadata,
+    Column("source", String(64), nullable=False), Column("name", String(512), nullable=False),
+    Column("arch", String(32), nullable=False), Column("category", String(32), nullable=False),
+    Column("product_name", String(512), nullable=False, default=""),
+    Column("publisher", String(255), nullable=False, default=""),
+    Column("evidence", String(1000), nullable=False), Column("updated_by", String(32), ForeignKey("users.id"), nullable=False),
+    Column("updated_at", _TS, nullable=False), Column("revision", Integer, nullable=False, default=1),
+    PrimaryKeyConstraint("source", "name", "arch"),
+)
+software_classification_events = Table("software_classification_events", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("source", String(64), nullable=False), Column("name", String(512), nullable=False),
+    Column("arch", String(32), nullable=False), Column("old_category", String(32), nullable=True),
+    Column("new_category", String(32), nullable=False), Column("evidence", String(1000), nullable=False),
+    Column("changed_by", String(32), ForeignKey("users.id"), nullable=False), Column("changed_at", _TS, nullable=False),
+)
+Index("ix_software_class_events", software_classification_events.c.source,
+      software_classification_events.c.name, software_classification_events.c.arch, software_classification_events.c.id)
+
+# 요청 역할은 관리자가 직접 사용자에게 부여한다. 각 사용자의 요청 가능 호스트도 별도로 지정한다.
+software_request_host_scopes = Table("software_request_host_scopes", metadata,
+    Column("user_id", String(32), ForeignKey("users.id"), nullable=False),
+    Column("host_id", String(128), ForeignKey("hosts.host_id"), nullable=False),
+    Column("granted_by", String(32), ForeignKey("users.id"), nullable=False), Column("granted_at", _TS, nullable=False),
+    PrimaryKeyConstraint("user_id", "host_id"),
+)
+software_request_scope_events = Table("software_request_scope_events", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", String(32), ForeignKey("users.id"), nullable=False),
+    Column("actor_id", String(32), ForeignKey("users.id"), nullable=False),
+    Column("old_host_ids", Text, nullable=False), Column("new_host_ids", Text, nullable=False),
+    Column("occurred_at", _TS, nullable=False),
+)
+Index("ix_software_request_scope_events", software_request_scope_events.c.user_id,
+      software_request_scope_events.c.id)
+software_requests = Table("software_requests", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("requester_id", String(32), ForeignKey("users.id"), nullable=False),
+    Column("source", String(64), nullable=False), Column("name", String(512), nullable=False),
+    Column("arch", String(32), nullable=False), Column("product_name", String(512), nullable=False),
+    Column("version", String(256), nullable=False), Column("purpose", String(2000), nullable=False),
+    Column("license_evidence", String(2000), nullable=False),
+    Column("status", String(32), nullable=False), Column("assignee_id", String(32), ForeignKey("users.id"), nullable=True),
+    Column("due_at", _TS, nullable=True), Column("approval_until", _TS, nullable=True),
+    Column("decision_reason", String(2000), nullable=False, default=""),
+    Column("revision", Integer, nullable=False, default=1),
+    Column("created_at", _TS, nullable=False), Column("updated_at", _TS, nullable=False),
+)
+Index("ix_software_requests_status", software_requests.c.status, software_requests.c.due_at)
+Index("ix_software_requests_owner", software_requests.c.requester_id, software_requests.c.created_at)
+software_request_hosts = Table("software_request_hosts", metadata,
+    Column("request_id", Integer, ForeignKey("software_requests.id"), nullable=False),
+    Column("host_id", String(128), ForeignKey("hosts.host_id"), nullable=False),
+    PrimaryKeyConstraint("request_id", "host_id"),
+)
+software_request_events = Table("software_request_events", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("request_id", Integer, ForeignKey("software_requests.id"), nullable=False),
+    Column("actor_id", String(32), ForeignKey("users.id"), nullable=False),
+    Column("action", String(32), nullable=False), Column("from_status", String(32), nullable=True),
+    Column("to_status", String(32), nullable=False), Column("reason", String(2000), nullable=False, default=""),
+    Column("detail", Text, nullable=False, default="{}"), Column("revision", Integer, nullable=False),
+    Column("occurred_at", _TS, nullable=False),
+)
+Index("ix_software_request_events", software_request_events.c.request_id, software_request_events.c.id)
+software_approvals = Table("software_approvals", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("request_id", Integer, ForeignKey("software_requests.id"), nullable=False),
+    Column("source", String(64), nullable=False), Column("name", String(512), nullable=False),
+    Column("arch", String(32), nullable=False), Column("version", String(256), nullable=False),
+    Column("host_id", String(128), ForeignKey("hosts.host_id"), nullable=False),
+    Column("state", String(16), nullable=False), Column("valid_from", _TS, nullable=False),
+    Column("valid_until", _TS, nullable=False), Column("decided_by", String(32), ForeignKey("users.id"), nullable=False),
+    Column("reason", String(2000), nullable=False), Column("ended_at", _TS, nullable=True),
+    Column("end_reason", String(2000), nullable=False, default=""),
+)
+Index("ix_software_approval_scope", software_approvals.c.source, software_approvals.c.name,
+      software_approvals.c.arch, software_approvals.c.version, software_approvals.c.host_id, software_approvals.c.state)
+
+# CVE 원자료, CISA KEV 기준일, 신선도 상태, 제품별 근거 평가를 인벤토리와 분리해 보관한다.
+vulnerability_cves = Table("vulnerability_cves", metadata,
+    Column("cve_id", String(32), primary_key=True), Column("description", Text, nullable=False, default=""),
+    Column("published_at", _TS, nullable=True), Column("modified_at", _TS, nullable=True),
+    Column("cvss_score", String(16), nullable=True), Column("cvss_severity", String(24), nullable=True),
+    Column("cvss_metrics", Text, nullable=False, default="{}"), Column("nvd_status", String(32), nullable=False, default=""),
+    Column("references", Text, nullable=False, default="[]"),
+    Column("configurations", Text, nullable=False, default="[]"), Column("nvd_fetched_at", _TS, nullable=True),
+)
+kev_entries = Table("kev_entries", metadata,
+    Column("cve_id", String(32), ForeignKey("vulnerability_cves.cve_id"), primary_key=True),
+    Column("vendor", String(255), nullable=False), Column("product", String(512), nullable=False),
+    Column("vulnerability_name", String(512), nullable=False), Column("date_added", String(10), nullable=False),
+    Column("due_date", String(10), nullable=False), Column("ransomware_use", String(16), nullable=False),
+    Column("required_action", Text, nullable=False), Column("notes", Text, nullable=False, default=""),
+    Column("catalog_version", String(32), nullable=False), Column("fetched_at", _TS, nullable=False),
+)
+vulnerability_feed_status = Table("vulnerability_feed_status", metadata,
+    Column("source", String(16), primary_key=True), Column("state", String(16), nullable=False),
+    Column("last_success_at", _TS, nullable=True), Column("last_attempt_at", _TS, nullable=True),
+    Column("last_error", String(500), nullable=False, default=""), Column("data_version", String(64), nullable=False, default=""),
+    Column("records", Integer, nullable=False, default=0),
+)
+vulnerability_product_matches = Table("vulnerability_product_matches", metadata,
+    Column("cve_id", String(32), ForeignKey("vulnerability_cves.cve_id"), nullable=False),
+    Column("source", String(64), nullable=False), Column("name", String(512), nullable=False),
+    Column("arch", String(32), nullable=False), Column("status", String(24), nullable=False),
+    Column("evidence", String(2000), nullable=False), Column("conditions", String(1000), nullable=False, default=""),
+    Column("affected_versions", Text, nullable=False, default="[]"),
+    Column("updated_by", String(32), ForeignKey("users.id"), nullable=False), Column("updated_at", _TS, nullable=False),
+    Column("revision", Integer, nullable=False, default=1),
+    PrimaryKeyConstraint("cve_id", "source", "name", "arch"),
+)
+vulnerability_match_events = Table("vulnerability_match_events", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True), Column("cve_id", String(32), nullable=False),
+    Column("source", String(64), nullable=False), Column("name", String(512), nullable=False), Column("arch", String(32), nullable=False),
+    Column("old_status", String(24), nullable=True), Column("new_status", String(24), nullable=False),
+    Column("evidence", String(2000), nullable=False), Column("changed_by", String(32), ForeignKey("users.id"), nullable=False),
+    Column("changed_at", _TS, nullable=False),
+)
+vulnerability_match_versions = Table("vulnerability_match_versions", metadata,
+    Column("cve_id", String(32), nullable=False), Column("source", String(64), nullable=False),
+    Column("name", String(512), nullable=False), Column("arch", String(32), nullable=False),
+    Column("version", String(256), nullable=False),
+    PrimaryKeyConstraint("cve_id", "source", "name", "arch", "version"),
+)

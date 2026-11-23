@@ -33,6 +33,7 @@ class AssetIn(BaseModel):
     parent_asset_id: int | None = Field(default=None, description="VM 이 올라간 물리 장비의 자산 id")
     host_id: str | None = Field(default=None, max_length=128, description="수집 호스트와 자동 연결이 안 될 때 관리자가 지정하는 명시 연결")
     note: str = Field(default="", max_length=500)
+    expected_revision: int | None = Field(default=None, ge=1)
 
     @field_validator("asset_no", "serial", "hostname", "domain", "ip", "host_id", "note", mode="before")
     @classmethod
@@ -76,9 +77,9 @@ class AssetIn(BaseModel):
         return self
 
 
-_STATUS = Query(None, pattern="^(linked|uncollected|unregistered|mismatch)$",
+_STATUS = Query(None, pattern="^(linked|uncollected|unregistered|registered|mismatch)$",
                 description="linked=연결됨, uncollected=대장에만 있음(미수집), unregistered=수집됐지만 대장에 없음, "
-                            "mismatch=대장과 수집값이 어긋난 행(flags 가 있는 모든 상태)")
+                            "registered=대장에 등록된 자산(연결·미수집 포함), mismatch=대장과 수집값이 어긋난 행(flags 가 있는 모든 상태)")
 _KIND = Query(None, pattern="^(physical|virtual|container|unknown)$")
 _CSV_COLUMNS = ["asset_no", "kind", "status", "hostname", "domain", "ip", "serial", "virt", "parent_asset_no", "host_id",
                 "match_by", "flags", "note"]
@@ -93,6 +94,8 @@ def _status_matches(row: dict[str, Any], status: str | None) -> bool:
     """mismatch 는 연결 상태가 아니라 flags(kind·serial·ip 불일치)가 하나라도 있는지로 판정한다."""
     if status is None:
         return True
+    if status == "registered":
+        return row["asset"] is not None
     return bool(row["flags"]) if status == "mismatch" else row["status"] == status
 
 
@@ -173,14 +176,19 @@ def build_router(repo: InventoryRepository, service: AssetService, require_read:
 
     @router.put("/{asset_id}", dependencies=admin)
     def update(asset_id: int, body: AssetIn) -> dict:
-        if repo.get_asset(asset_id) is None:
+        current = repo.get_asset(asset_id)
+        if current is None:
             raise HTTPException(404, "asset not found")
+        # expected_revision 은 신규 UI가 stale 폼을 보호하는 선택적 precondition이다. 구형 API 호출은
+        # 유지하지만 revision 을 전진시켜 다른 열린 폼이 그 변경을 덮어쓰지 못하게 한다.
         values = validate(body, asset_id)
         try:
-            if not repo.update_asset(asset_id, values, now()):
+            if not repo.update_asset(asset_id, values, now(), body.expected_revision):
                 raise HTTPException(404, "asset not found")
-        except ConflictError:
-            raise HTTPException(409, "자산번호 또는 호스트 연결이 이미 사용 중이다") from None
+        except ConflictError as exc:
+            message = ("자산이 다른 사용자에 의해 변경되었습니다. 최신 값을 다시 불러오세요."
+                       if "revision changed" in str(exc) else "자산번호 또는 호스트 연결이 이미 사용 중이다")
+            raise HTTPException(409, message) from None
         return repo.get_asset(asset_id) or {}
 
     @router.delete("/{asset_id}", dependencies=admin)
