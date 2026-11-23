@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import itertools
 import json
+import os
 import re
 import socket
 import threading
@@ -24,6 +25,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from cryptography.fernet import Fernet
 
 pytest.importorskip("playwright.sync_api", reason="playwright 가 설치되어 있지 않다")
 pytest.importorskip("uvicorn", reason="uvicorn 이 설치되어 있지 않다")
@@ -38,7 +40,9 @@ import uvicorn  # noqa: E402
 from swinventory.common.models import KernelInfo, OsInfo, PackageRecord, Snapshot  # noqa: E402
 from swinventory.server import app as server_app  # noqa: E402
 from swinventory.server.app import ApiSettings, create_app  # noqa: E402
+from swinventory.server.ai.llm import LlmResult  # noqa: E402
 from swinventory.server.repo.sql import SqlInventoryRepository  # noqa: E402
+from swinventory.server.secrets import SecretBox  # noqa: E402
 from swinventory.server.services.ingest import IngestService  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -121,6 +125,14 @@ class Site:
                 "big_host": f"#/hosts/{BIG_HOST}"}[name]
 
 
+@dataclass
+class AiHeaderSite:
+    base: str
+    repo: SqlInventoryRepository
+    box: SecretBox
+    llm: object
+
+
 def _add_big_host(repo, now: datetime) -> None:
     """패키지 450개 호스트 — 200행 상한·'더 보기'·버전 정렬(2.2.x < 2.10.x)을 시험하려면 행이 많아야 한다."""
     pkgs = [PackageRecord("dpkg", f"pkg-{i:03d}", f"2.{i % 12}.{i % 5}", "amd64") for i in range(450)]
@@ -188,6 +200,33 @@ def events_base(tmp_path_factory):
     agents.mkdir()
     server, thread, base = _serve(create_app(repo, ApiSettings(ingest_tokens=(ING,), read_tokens=(RD,), admin_tokens=(ADM,)), env={}, agent_dir=agents))
     yield base
+    server.should_exit = True
+    thread.join(10)
+
+
+@pytest.fixture
+def ai_header_site(tmp_path):
+    """AI 헤더 브라우저 시험은 테스트 DB와 임시 Fernet 키만 사용한다 — 사용자 홈 비밀 키에 접근하지 않는다."""
+    repo = SqlInventoryRepository.from_url(f"sqlite:///{tmp_path / 'ai-headers.db'}")
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    box = SecretBox(Fernet.generate_key())
+    class RecordingLlm:
+        def __init__(self):
+            self.configs = []
+
+        def __call__(self, config):
+            self.configs.append(config)
+            return self
+
+        def complete(self, system, user):
+            return LlmResult("OK", self.configs[-1].model, 1, 1)
+
+    llm = RecordingLlm()
+    env = {"SWINV_JWT_SECRET": "ui-ai-test-secret-" + "x" * 48}
+    server, thread, base = _serve(create_app(repo, ApiSettings(ingest_tokens=(ING,), read_tokens=(RD,), admin_tokens=(ADM,)),
+                                       secret_box=box, llm_factory=llm, env=env, agent_dir=agents))
+    yield AiHeaderSite(base, repo, box, llm)
     server.should_exit = True
     thread.join(10)
 
@@ -1527,6 +1566,185 @@ def test_ai_actions_report_failures_in_an_alert_and_do_not_stay_disabled(site, m
     expect(page.get_by_role("alert").filter(has_text="설정 화면에서 AI 연결을 입력하세요")).to_be_visible()
     expect(generate).to_be_enabled()                                               # 실패했다고 영구히 꺼지지 않는다
     assert [p for p in page.problems if "409" not in p] == [], page.problems          # 409(AI 미설정)로 인한 리소스 로드 오류만 허용한다
+
+
+def test_ai_custom_headers_add_preserve_rename_delete_and_test_saved_config(ai_header_site, make_page):
+    page = make_page(token=ADM, width=1440, height=1100)
+    open_route(page, ai_header_site.base, "#/settings")
+    ai_panel = page.locator("#app .panel").filter(has=page.locator(".ai-extra-headers"))
+    section = ai_panel.locator(".ai-extra-headers")
+    expect(ai_panel).to_have_count(1)
+    expect(section).to_contain_text("값은 암호화 저장되며 다시 표시되지 않습니다")
+    expect(page.get_by_text("연결 테스트는 현재 저장된 설정만 사용합니다.")).to_be_visible()
+    def save_successfully():
+        with page.expect_response(lambda response: urlparse(response.url).path == "/v1/settings/ai" and response.request.method == "PUT") as response:
+            ai_panel.get_by_role("button", name="저장", exact=True).click()
+        assert response.value.status == 200, response.value.text()
+        expect(ai_panel.locator(".msg [role=status]")).to_contain_text("저장했습니다")
+
+    page.get_by_label("엔드포인트(base_url)").fill("https://llm.corp.example/v1")
+    page.get_by_label("모델").fill("ui-test-model")
+
+    section.get_by_role("button", name="+ 헤더 추가").click()
+    row = section.locator(".ai-header-row").nth(0)
+    row.get_by_label("헤더 이름").fill("X-Org-Token")
+    row.get_by_label("헤더 값").fill("saved-header-secret")
+    section.get_by_label("사용자 인증 헤더").select_option(label="X-Org-Token")
+    save_successfully()
+    expect(row.get_by_label("헤더 값")).to_have_value("")
+    expect(row.get_by_text("저장됨 · 값은 다시 표시되지 않습니다")).to_be_visible()
+    saved = call(ai_header_site.base, "/v1/settings/ai")
+    assert saved["extra_headers"] == [{"name": "X-Org-Token", "has_value": True}]
+    assert saved["auth_header"] == "X-Org-Token"
+    raw = ai_header_site.repo.get_setting("ai_config")
+    assert "saved-header-secret" not in raw
+    stored = json.loads(raw)
+    assert ai_header_site.box.decrypt(stored["extra_headers"][0]["value_enc"]) == "saved-header-secret"
+    browser_storage = page.evaluate("() => JSON.stringify({local: localStorage, session: sessionStorage})")
+    assert "saved-header-secret" not in browser_storage
+
+    open_route(page, ai_header_site.base, "#/settings")
+    ai_panel = page.locator("#app .panel").filter(has=page.locator(".ai-extra-headers"))
+    section = ai_panel.locator(".ai-extra-headers")
+    row = section.locator(".ai-header-row").nth(0)
+    expect(row.get_by_label("헤더 값")).to_have_value("")
+    expect(row.get_by_text("저장됨 · 값은 다시 표시되지 않습니다")).to_be_visible()
+
+    # 빈 이름과 대소문자만 다른 중복 이름은 저장 전에 해당 입력에 알린다.
+    section.get_by_role("button", name="+ 헤더 추가").click()
+    duplicate = section.locator(".ai-header-row").nth(1)
+    ai_panel.get_by_role("button", name="저장", exact=True).click()
+    expect(duplicate.get_by_label("헤더 이름")).to_have_attribute("aria-invalid", "true")
+    expect(duplicate.locator(".ai-header-field:first-child .field-error")).to_contain_text("헤더 이름을 입력하세요")
+    duplicate.get_by_label("헤더 이름").fill("x-org-token")
+    ai_panel.get_by_role("button", name="저장", exact=True).click()
+    expect(duplicate.locator(".ai-header-field:first-child .field-error")).to_contain_text("중복할 수 없습니다")
+    duplicate.get_by_role("button", name="x-org-token 삭제").click()
+
+    # 이름의 대소문자만 바꾸면 빈 비밀번호로도 원래 비밀값을 유지하고 선택도 새 이름으로 맞춘다.
+    row.get_by_label("헤더 이름").fill("x-org-token")
+    expect(section.get_by_label("사용자 인증 헤더")).to_have_value("x-org-token")
+    save_successfully()
+    saved = call(ai_header_site.base, "/v1/settings/ai")
+    assert saved["extra_headers"] == [{"name": "x-org-token", "has_value": True}]
+    assert saved["auth_header"] == "x-org-token"
+    assert ai_header_site.box.decrypt(json.loads(ai_header_site.repo.get_setting("ai_config"))["extra_headers"][0]["value_enc"]) == "saved-header-secret"
+
+    # 실제 이름 변경은 이전 값을 몰래 다른 이름으로 복사하지 않고 새 값 입력을 요구한다.
+    row.get_by_label("헤더 이름").fill("X-Renamed-Token")
+    ai_panel.get_by_role("button", name="저장", exact=True).click()
+    expect(row.get_by_label("헤더 값")).to_have_attribute("aria-invalid", "true")
+    expect(row.locator(".ai-header-field").nth(1).locator(".field-error")).to_contain_text("다른 헤더 이름으로 이동할 수 없습니다")
+    assert call(ai_header_site.base, "/v1/settings/ai")["extra_headers"] == [{"name": "x-org-token", "has_value": True}]
+    row.get_by_label("헤더 값").fill("replacement-header-secret")
+    section.get_by_label("사용자 인증 헤더").select_option(label="X-Renamed-Token")
+    save_successfully()
+    expect(row.get_by_label("헤더 값")).to_have_value("")
+    saved = call(ai_header_site.base, "/v1/settings/ai")
+    assert saved["extra_headers"] == [{"name": "X-Renamed-Token", "has_value": True}]
+    assert saved["auth_header"] == "X-Renamed-Token"
+
+    # 같은 origin 의 경로 변경은 보존되고, 연결 테스트는 아직 입력한 값이 아닌 저장된 비밀값으로 호출된다.
+    page.get_by_label("엔드포인트(base_url)").fill("https://llm.corp.example/v2")
+    expect(section.locator(".ai-origin-notice")).to_be_hidden()
+    save_successfully()
+    expect(row.get_by_label("헤더 값")).to_have_value("")
+    row.get_by_label("헤더 값").fill("unsaved-only-secret")
+    ai_panel.get_by_role("button", name="연결 테스트").click()
+    expect(ai_panel.get_by_role("status").filter(has_text="연결 성공")).to_be_visible()
+    assert ai_header_site.llm.configs[-1].extra_headers == (("X-Renamed-Token", "replacement-header-secret"),)
+    assert "unsaved-only-secret" not in ai_header_site.repo.get_setting("ai_config")
+    assert "unsaved-only-secret" not in page.evaluate("() => JSON.stringify({local: localStorage, session: sessionStorage})")
+
+    # 새 origin 에 저장값을 그대로 보내려 하면 서버 정책과 안내를 확인하고, 새 비밀값을 넣으면 저장된다.
+    row.get_by_label("헤더 값").fill("")
+    page.get_by_label("엔드포인트(base_url)").fill("https://next.corp.example/v1")
+    expect(section.locator(".ai-origin-notice")).to_be_visible()
+    expect(section.locator(".ai-origin-notice")).to_contain_text("새 값을 입력하거나 해당 행을 삭제")
+    with page.expect_response(lambda response: urlparse(response.url).path == "/v1/settings/ai" and response.request.method == "PUT") as rejected:
+        ai_panel.get_by_role("button", name="저장", exact=True).click()
+    assert rejected.value.status == 422
+    expect(ai_panel.get_by_role("alert").filter(has_text="새 엔드포인트")).to_be_visible()
+    expected_errors = [problem for problem in page.problems if "422" in problem]
+    assert expected_errors == page.problems, page.problems
+    page.problems.clear()
+    row.get_by_label("헤더 값").fill("next-origin-secret")
+    save_successfully()
+    expect(section.locator(".ai-origin-notice")).to_be_hidden()
+    saved = call(ai_header_site.base, "/v1/settings/ai")
+    assert saved["base_url"] == "https://next.corp.example/v1"
+    assert ai_header_site.box.decrypt(json.loads(ai_header_site.repo.get_setting("ai_config"))["extra_headers"][0]["value_enc"]) == "next-origin-secret"
+
+    # 저장된 빈 문자열도 실제 헤더값으로 저장되며 행을 지우면 인증 헤더 선택도 함께 해제된다.
+    section.get_by_role("button", name="+ 헤더 추가").click()
+    empty_row = section.locator(".ai-header-row").nth(1)
+    empty_row.get_by_label("헤더 이름").fill("X-Empty-Value")
+    section.get_by_label("사용자 인증 헤더").select_option(label="X-Empty-Value")
+    save_successfully()
+    saved = call(ai_header_site.base, "/v1/settings/ai")
+    assert saved["extra_headers"][1] == {"name": "X-Empty-Value", "has_value": True}
+    assert ai_header_site.box.decrypt(json.loads(ai_header_site.repo.get_setting("ai_config"))["extra_headers"][1]["value_enc"]) == ""
+    empty_row.get_by_role("button", name="X-Empty-Value 삭제").click()
+    expect(section.get_by_label("사용자 인증 헤더")).to_have_value("")
+    save_successfully()
+    saved = call(ai_header_site.base, "/v1/settings/ai")
+    assert saved["extra_headers"] == [{"name": "X-Renamed-Token", "has_value": True}]
+    assert saved["auth_header"] is None
+
+    # 비밀 초안은 폼 재렌더 사이에 저장되지 않는다.
+    section.get_by_role("button", name="+ 헤더 추가").click()
+    unsaved = section.locator(".ai-header-row").nth(1)
+    unsaved.get_by_label("헤더 이름").fill("X-Temporary")
+    unsaved.get_by_label("헤더 값").fill("navigation-only-secret")
+    storage = page.evaluate("() => JSON.stringify({local: localStorage, session: sessionStorage})")
+    assert "navigation-only-secret" not in storage
+    open_route(page, ai_header_site.base, "#/overview")
+    open_route(page, ai_header_site.base, "#/settings")
+    new_section = page.locator(".ai-extra-headers")
+    expect(new_section.locator(".ai-header-row")).to_have_count(1)
+    assert page.problems == [], page.problems
+
+
+def test_ai_custom_headers_read_role_and_mobile_layout(ai_header_site, make_page):
+    read_page = make_page(token=RD, width=390, height=844)
+    requested = []
+    read_page.on("request", lambda request: requested.append(urlparse(request.url).path) if "/v1/settings/ai" in request.url else None)
+    open_route(read_page, ai_header_site.base, "#/settings")
+    expect(read_page.get_by_text(f"AI 연결 설정을 보려면 {ADMIN_ONLY}.")).to_be_visible()
+    assert "/v1/settings/ai" not in requested
+    assert read_page.locator(".ai-extra-headers, .ai-header-row").count() == 0
+    assert read_page.problems == [], read_page.problems
+
+    admin_page = make_page(token=ADM, width=390, height=844)
+    open_route(admin_page, ai_header_site.base, "#/settings")
+    section = admin_page.locator(".ai-extra-headers")
+    section.get_by_role("button", name="+ 헤더 추가").click()
+    row = section.locator(".ai-header-row").first
+    row.get_by_label("헤더 이름").fill("X-Mobile-Key")
+    row.get_by_label("헤더 값").fill("mobile-only-secret")
+    assert admin_page.evaluate("() => document.documentElement.scrollWidth") <= 390
+    assert section.evaluate("(el) => el.scrollWidth <= el.clientWidth")
+    assert admin_page.problems == [], admin_page.problems
+
+
+def test_ai_custom_headers_desktop_screenshot(ai_header_site, make_page, tmp_path):
+    call(ai_header_site.base, "/v1/settings/ai", method="PUT", body={
+        "base_url": "https://llm.corp.example/v1", "model": "gpt-oss", "trust_zone": "internal",
+        "api_key": None, "clear_api_key": False, "verify_ssl": None, "ca_file": None, "timeout": 120,
+        "max_tokens": 4000, "auth_header": "X-Company-Key",
+        "extra_headers": [{"name": "X-Company-Key", "value": "screenshot-secret-value"},
+                          {"name": "X-Request-Source", "value": "inventory-console"}],
+    })
+    page = make_page(token=ADM, width=1500, height=1200)
+    open_route(page, ai_header_site.base, "#/settings")
+    expect(page.locator(".ai-header-row")).to_have_count(2)
+    expect(page.get_by_label("헤더 값").first).to_have_value("")
+    screenshot_dir = Path(os.environ.get("SWINV_UI_SCREENSHOT_DIR", tmp_path))
+    screenshot = screenshot_dir / "ai-extra-headers-desktop.png"
+    screenshot.parent.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(screenshot), full_page=True)
+    assert screenshot.is_file() and screenshot.stat().st_size > 10_000
+    assert page.problems == [], page.problems
 
 
 

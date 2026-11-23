@@ -18,7 +18,8 @@
 | Windows 에이전트 (C#, `windows-agent/`) | 구현 · Linux 컨테이너에서 xUnit 88건·실제 TLS/mTLS·실제 네트워크 API·실제 서버 HTTP 업로드·트리밍 바이너리 `doctor` 검증. **레지스트리·PowerShell·예약 작업은 실제 Windows 에서 검증하지 못했다**(아래 "Windows 에이전트") |
 | 커널 하한선, AI 종합 분석 리포트, 설정 화면 | 구현 · 브라우저(Chrome)와 컨테이너 종단 검증 |
 | IP·MAC, 열린 포트(노출 판정·IP 충돌) | 구현 · 실제 Ubuntu/Debian/Rocky 컨테이너에서 검증 (Windows 는 Fake 만) |
-| CVE/취약점, 컨테이너 이미지 | 범위 밖(모델은 확장 가능하게 설계) |
+| CVE/취약점 | 구현 · CISA KEV·NVD 연동 및 호스트별 영향 근거 확인 |
+| 컨테이너 이미지 | 범위 밖(모델은 확장 가능하게 설계) |
 
 ## 빠른 시작
 
@@ -163,7 +164,8 @@ swinventory-agent doctor --config "$env:ProgramData\swinventory\agent.json"     
 | 네트워크 | IP·MAC 인벤토리(검색·충돌 표시·CSV), 열린 포트 요약(프로토콜·노출 범위·주의 포트 필터)과 포트별 호스트 목록(CSV) |
 | 변경 이력 | 유형·호스트·기간 필터, CSV |
 | AI 리포트 | 종합 분석 리포트 생성·조회·마크다운 저장·삭제, 근거 집계(facts) 확인 |
-| 설정 | 커널 하한선 편집, AI 연결(엔드포인트·모델·키·신뢰 영역·TLS) 설정과 연결 테스트 |
+| 취약점 | CISA KEV·NVD 자료, 호스트별 설치 근거, 관리자 영향 판정과 증거 |
+| 설정 | 커널 하한선 편집, AI 연결(엔드포인트·모델·키·추가 헤더·신뢰 영역·TLS) 설정과 연결 테스트 |
 
 호스트명·패키지명은 에이전트가 보낸 신뢰할 수 없는 값이라 화면은 `innerHTML` 없이 `textContent` 로만 그리고 CSP 헤더를 붙인다.
 CSV 는 엑셀 수식 주입(`=`, `+`, `-`, `@` 로 시작하는 셀)을 막는다. 소유팀·환경은 수집이 아니라 **태그**(`team=infra`)로 서버에서 관리한다.
@@ -182,6 +184,14 @@ CSV 는 엑셀 수식 주입(`=`, `+`, `-`, `@` 로 시작하는 셀)을 막는�
 
 비교는 숫자 단위(`5.15.0-91 < 5.15.0-100`)이고 계열 규칙이 `*` 보다 우선한다. 저장 즉시 반영되며(새 수집을 기다리지 않음),
 규칙이 없는 계열이나 커널 정보가 없는 호스트는 "판정 안 함"으로 미달에 세지 않는다. 빈 목록으로 저장하면 하한선이 해제된다.
+
+## 취약점 영향 조회
+
+취약점 화면은 CISA KEV와 NVD CVE 자료를 보여 주고, 설치된 제품·아키텍처·버전과 관리자가 입력한 근거를 연결한다. CISA KEV 등재 여부는 우선 확인 표시이며, 정확한 제품·설치 버전과 검토 근거 없이는 영향이 확정되지 않는다. 판정되지 않은 항목은 영향 없음으로 간주하지 않는다.
+
+관리자 로그인으로 **KEV·NVD 갱신**을 실행하면 CISA KEV 전체와 NVD 2.0의 최근 120일 수정분을 갱신한다. 한 번의 요청은 NVD 200건 페이지 하나를 가져오며, `partial`이면 다시 실행해 다음 페이지를 이어 받는다. 실패해도 마지막 성공 데이터와 NVD 커서는 유지된다.
+
+기존 PostgreSQL DB의 `vulnerability_feed_status.data_version`이 `VARCHAR(64)`이면 서버 시작 시 저장된 값을 보존하며 `TEXT`로 확장한다. 이 변경을 배포한 뒤 서버를 재시작해 마이그레이션을 적용한다. NVD의 페이지 커서와 완료 상태는 길이를 자르지 않고 유지한다.
 
 ## 자산 관리: VM/물리·시리얼·도메인·IP
 
@@ -247,10 +257,14 @@ CSV 는 엑셀 수식 주입(`=`, `+`, `-`, `@` 로 시작하는 셀)을 막는�
 |---|---|
 | 엔드포인트(base_url) | OpenAI 호환 `/chat/completions` 의 기준 주소. 예) `https://llm.corp.example/v1`, 로컬 `http://127.0.0.1:11434/v1` |
 | 모델 | 업스트림 모델명 |
-| 신뢰 영역 | `internal`(사내 게이트웨이) / `external`(외부 서비스 — **https 필수, TLS 검증 해제 불가, 키 필수**). `api.openai.com` 은 external 로 고정 |
-| API 키 | **쓰기 전용**. 암호화(Fernet, `enc:v1:`)해 저장하고 화면·API 응답에는 "저장됨"만 보인다. 비워 저장하면 기존 키 유지. 설정에 없으면 환경변수 `OPENAI_API_KEY` 폴백. 키 없는 사내 게이트웨이(로컬 Ollama 등)는 비워도 된다 |
+| 신뢰 영역 | `internal`(사내 게이트웨이) / `external`(외부 서비스 — **https 필수, TLS 검증 해제 불가, API 키 또는 사용자 인증 헤더 필요**). `api.openai.com` 은 external 로 고정 |
+| API 키 | **쓰기 전용**. Bearer `Authorization` 값으로 전송하고 암호화(Fernet, `enc:v1:`)해 저장한다. 화면·API 응답에는 저장 여부만 보인다. 비워 저장하면 기존 키 유지. 설정에 없으면 환경변수 `OPENAI_API_KEY` 폴백. 키 없는 사내 게이트웨이(로컬 Ollama 등)는 비워도 된다 |
+| 추가 HTTP 헤더 | 사내 게이트웨이의 `api-key`, `X-...` 같은 헤더를 추가·수정·삭제할 수 있다. 값은 암호화해 저장하고 조회 응답에는 이름과 `has_value`만 보낸다. API에서 같은 이름(대소문자 무시)의 `null`/생략은 기존 값 보존, `""`는 빈 값을 뜻한다. 새 이름에는 `null`/생략으로 기존 값을 연결할 수 없어 빈 값으로 저장되며, 화면에서는 이름 변경 시 새 값을 입력해야 한다. 화면에서 기존 값 칸을 비우면 기존 값을 유지하고 행 삭제로 헤더를 제거한다. 최대 32개, 이름 128자, 값 4,096자, 전체 16 KiB다. 헤더 이름은 HTTP token 형식이어야 하며 중복·`Host`·`Content-Length`·전송 제어 헤더는 거부한다. 값은 Latin-1 범위여야 하고 CR/LF/NUL 등 제어문자를 거부한다. |
+| 사용자 인증 헤더 | 추가 헤더 중 하나를 인증 헤더로 명시할 수 있다. external 은 API 키 또는 값이 있는 사용자 인증 헤더가 필요하며, `X-Request-Id` 같은 일반 헤더만으로 이 조건을 충족하지 않는다. 추가 `Authorization`은 Bearer API 키와 함께 쓸 수 없어, 충돌하면 설정 저장을 거부한다. 사용자 `Authorization`을 쓰려면 설정 API 키를 지우고, `OPENAI_API_KEY` 환경변수도 설정되어 있지 않아야 한다. |
 | TLS 검증 | 기본 검증. 자가서명 사내 게이트웨이는 **사설 CA 파일(`ca_file`) 지정을 권장**하고, 검증 끄기는 internal 에서만 허용 |
 | 제한 | URL 에 자격증명(`user:pw@`, `?api_key=`) 금지, 링크 로컬·클라우드 메타데이터 주소 금지, `SWINV_AI_ENDPOINT_ALLOWLIST` 로 허용 호스트 제한 가능 |
+
+base URL 의 scheme, 호스트 또는 포트를 바꾸면 기존 추가 헤더 비밀값은 새 대상으로 자동 전송되지 않는다. 저장하려면 남길 헤더의 값을 새로 입력하거나 해당 행을 삭제해야 한다. 같은 origin 안에서 경로만 바꾸면 저장값을 유지한다. "저장된 설정 연결 테스트"는 저장 완료된 설정을 사용하며 AI 리포트 생성에도 같은 헤더가 적용된다. 오류 메시지는 API 키와 추가 헤더 값을 가린다.
 
 "연결 테스트"로 확인한 뒤 AI 리포트 화면에서 생성한다(admin, 동기 호출이라 수십 초~수 분, 동시에 하나만).
 조회 권한 사용자는 리포트를 열람할 수 있고 생성·설정은 관리자만 가능하다.
@@ -316,6 +330,9 @@ CSV 는 엑셀 수식 주입(`=`, `+`, `-`, `@` 로 시작하는 셀)을 막는�
 | GET | `/v1/network/ports?host=&proto=&exposure=` , `/v1/network/listening?host=&proto=&port=&exposure=&notable=&tag=&q=&format=csv` | 포트 요약(호스트 수·외부 바인딩 수) / 호스트×포트 평면 목록(감사·내보내기). `exposure`: any·specific·loopback·exposed(루프백 제외) |
 | GET, PUT | `/v1/settings/kernel-policy` | 커널 하한선 조회(read) / 저장(admin) |
 | GET, PUT, POST | `/v1/settings/ai` , `/v1/settings/ai/test` | AI 연결 설정 조회·저장·연결 테스트 (admin) |
+| GET | `/v1/vulnerability-feeds` , `/v1/vulnerabilities?host=&q=&kev=&impact=&page=` , `/v1/vulnerabilities/{cve_id}` | 피드 상태(read) / CVE 검색·호스트별 영향 목록과 상세(read) |
+| POST | `/v1/vulnerabilities/sync` | CISA KEV 전체 및 NVD 다음 페이지 갱신(관리자 로그인 세션) |
+| PUT | `/v1/vulnerabilities/matches` | 설치 제품별 CVE 영향 상태와 근거 저장(admin) |
 | GET | `/v1/reports/facts` | AI 에 전달되는 집계(read) |
 | POST, GET, DELETE | `/v1/reports` , `/v1/reports/{id}` | 리포트 생성(admin, 502=AI 실패 · 409=미설정 · 429=생성 중) / 목록·조회(read) / 삭제(admin) |
 

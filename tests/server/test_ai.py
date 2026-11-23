@@ -12,7 +12,7 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from swinventory.server.ai.llm import (
-    AiConfig, LlmError, LlmResult, OpenAICompatClient, UrllibAiHttp,
+    AiConfig, AiHttp, LlmError, LlmResult, OpenAICompatClient, UrllibAiHttp,
 )
 from swinventory.server.app import ApiSettings, create_app
 from swinventory.server.secrets import SecretBox
@@ -161,11 +161,142 @@ def test_external_endpoint_requires_a_key(repo, clock, llm, box):
     assert llm.calls == []
 
 
+def test_custom_headers_are_encrypted_write_only_and_empty_value_is_preserved(client, repo, box):
+    configure(client, extra_headers=[{"name": "X-Gateway-Key", "value": "header-secret-91"},
+                                     {"name": "X-Empty", "value": ""},
+                                     {"name": "X-Prefix", "value": "enc:v1:looks-like-cipher"}])
+    shown = client.get("/v1/settings/ai", headers=AD).json()
+    assert shown["extra_headers"] == [
+        {"name": "X-Gateway-Key", "has_value": True}, {"name": "X-Empty", "has_value": True},
+        {"name": "X-Prefix", "has_value": True}]
+    assert all(secret not in json.dumps(shown) for secret in ("header-secret-91", "enc:v1:looks-like-cipher"))
+    assert "value" not in shown["extra_headers"][0]
+    raw = repo.get_setting("ai_config")
+    assert "header-secret-91" not in raw and "enc:v1:looks-like-cipher" not in raw
+    stored = json.loads(raw)
+    assert box.decrypt(stored["extra_headers"][0]["value_enc"]) == "header-secret-91"
+    assert box.decrypt(stored["extra_headers"][1]["value_enc"]) == ""
+    assert box.decrypt(stored["extra_headers"][2]["value_enc"]) == "enc:v1:looks-like-cipher"
+    assert client.post("/v1/settings/ai/test", headers=AD).json()["ok"] is True
+
+
+def test_custom_header_blank_input_keeps_value_and_omitting_row_deletes_it(client, repo):
+    configure(client, extra_headers=[{"name": "X-Gateway-Key", "value": "header-secret-91"}])
+    saved = client.put("/v1/settings/ai", json={**GOOD, "extra_headers": [{"name": "x-gateway-key", "value": None}],
+                                                  "auth_header": None}, headers=AD)
+    assert saved.status_code == 200, saved.text
+    assert json.loads(repo.get_setting("ai_config"))["extra_headers"][0]["name"] == "x-gateway-key"
+    assert client.get("/v1/settings/ai", headers=AD).json()["extra_headers"][0]["has_value"] is True
+    removed = client.put("/v1/settings/ai", json={**GOOD, "extra_headers": [], "auth_header": None}, headers=AD)
+    assert removed.status_code == 200, removed.text
+    assert client.get("/v1/settings/ai", headers=AD).json()["extra_headers"] == []
+
+
+@pytest.mark.parametrize("headers", [
+    [{"name": "Bad Header", "value": "x"}],
+    [{"name": "X-Key", "value": "a"}, {"name": "x-key", "value": "b"}],
+    [{"name": "Host", "value": "evil.example"}],
+    [{"name": "Content-Length", "value": "0"}],
+    [{"name": "Transfer-Encoding", "value": "chunked"}],
+    [{"name": "X-Key", "value": "bad\r\nInjected: yes"}],
+    [{"name": "X-Key", "value": "bad\x00value"}],
+    [{"name": "X-Key", "value": "한글"}],
+    [{"name": "X" * 129, "value": "x"}],
+    [{"name": "X-Key", "value": "x" * 4097}],
+])
+def test_invalid_custom_header_is_rejected_without_persisting(client, headers):
+    response = client.put("/v1/settings/ai", json={**GOOD, "extra_headers": headers}, headers=AD)
+    assert response.status_code == 422
+    assert client.get("/v1/settings/ai", headers=AD).json()["configured"] is False
+
+
+def test_ai_validation_error_does_not_echo_custom_header_secret(client):
+    secret = "header-secret-91"
+    response = client.put("/v1/settings/ai", json={**GOOD, "extra_headers": [{"name": "X-Key", "value": secret + "\r\nX-Injected: yes"}]}, headers=AD)
+    assert response.status_code == 422 and secret not in response.text
+
+
+def test_combined_size_limit_counts_preserved_secret_values(client, repo):
+    headers = [{"name": f"X-{i:02d}", "value": "v" * 4000} for i in range(4)]
+    configure(client, extra_headers=headers)
+    before = repo.get_setting("ai_config")
+    body = {**GOOD, "extra_headers": [{"name": h["name"], "value": None} for h in headers] +
+            [{"name": "X-New", "value": "n" * 400}]}
+    response = client.put("/v1/settings/ai", json=body, headers=AD)
+    assert response.status_code == 422 and "16 KiB" in response.text
+    assert repo.get_setting("ai_config") == before
+
+
+def test_custom_authorization_must_not_conflict_with_bearer_api_key(client):
+    response = client.put("/v1/settings/ai", json={**GOOD, "extra_headers": [{"name": "aUtHoRiZaTiOn", "value": "Basic abc"}],
+                                                    "auth_header": "aUtHoRiZaTiOn"}, headers=AD)
+    assert response.status_code == 422 and "Authorization" in response.text
+    assert client.get("/v1/settings/ai", headers=AD).json()["configured"] is False
+
+
+def test_external_endpoint_accepts_only_explicit_nonempty_auth_header(client, llm):
+    body = {k: v for k, v in GOOD.items() if k != "api_key"}
+    headers = [{"name": "X-Company-Credential", "value": "external-secret"}]
+    saved = client.put("/v1/settings/ai", json={**body, "trust_zone": "external", "extra_headers": headers,
+                                                  "auth_header": "x-company-credential"}, headers=AD)
+    assert saved.status_code == 200, saved.text
+    assert client.post("/v1/settings/ai/test", headers=AD).json()["ok"] is True
+    assert llm.config.api_key == "" and llm.config.extra_headers == (("X-Company-Credential", "external-secret"),)
+
+
+def test_external_metadata_header_does_not_satisfy_auth_requirement(client, llm):
+    body = {k: v for k, v in GOOD.items() if k != "api_key"}
+    saved = client.put("/v1/settings/ai", json={**body, "trust_zone": "external",
+                                                  "extra_headers": [{"name": "X-Request-Id", "value": "request-1"}]}, headers=AD)
+    assert saved.status_code == 200
+    response = client.post("/v1/settings/ai/test", headers=AD).json()
+    assert response["ok"] is False and "인증" in response["error"]
+    assert llm.calls == []
+
+
+def test_connection_test_and_report_generation_use_the_same_custom_headers(client, llm):
+    configure(client, extra_headers=[{"name": "X-Gateway-Key", "value": "header-secret-91"}], auth_header="X-Gateway-Key")
+    test_response = client.post("/v1/settings/ai/test", headers=AD)
+    assert test_response.json()["ok"] is True
+    assert llm.config.extra_headers == (("X-Gateway-Key", "header-secret-91"),)
+    report = client.post("/v1/reports", headers=AD)
+    assert report.status_code == 200, report.text
+    assert llm.config.extra_headers == (("X-Gateway-Key", "header-secret-91"),)
+
+
+def test_origin_change_requires_replacing_or_removing_existing_custom_headers(client, repo):
+    configure(client, extra_headers=[{"name": "X-Gateway-Key", "value": "header-secret-91"}], auth_header="X-Gateway-Key")
+    old = json.loads(repo.get_setting("ai_config"))
+    response = client.put("/v1/settings/ai", json={**GOOD, "base_url": "https://other.corp.example/v1",
+                                                    "extra_headers": [{"name": "X-Gateway-Key", "value": None}],
+                                                    "auth_header": "X-Gateway-Key"}, headers=AD)
+    assert response.status_code == 422 and "새 엔드포인트" in response.text
+    assert json.loads(repo.get_setting("ai_config")) == old
+    replaced = client.put("/v1/settings/ai", json={**GOOD, "base_url": "https://other.corp.example/v1",
+                                                    "extra_headers": [{"name": "X-Gateway-Key", "value": "replacement-secret"}],
+                                                    "auth_header": "X-Gateway-Key"}, headers=AD)
+    assert replaced.status_code == 200, replaced.text
+    raw = json.loads(repo.get_setting("ai_config"))
+    assert raw["base_url"] == "https://other.corp.example/v1"
+    assert "replacement-secret" not in repo.get_setting("ai_config")
+
+
+def test_same_origin_path_change_keeps_custom_header(client, llm):
+    configure(client, extra_headers=[{"name": "X-Gateway-Key", "value": "header-secret-91"}])
+    body = {**GOOD, "base_url": "https://LLM.corp.example:443/v2", "extra_headers": [{"name": "x-gateway-key", "value": None}],
+            "auth_header": None}
+    saved = client.put("/v1/settings/ai", json=body, headers=AD)
+    assert saved.status_code == 200, saved.text
+    client.post("/v1/settings/ai/test", headers=AD)
+    assert llm.config.extra_headers == (("x-gateway-key", "header-secret-91"),)
+
+
 # --- OpenAI 호환 클라이언트(실제 HTTP) --------------------------------------
 
 class _OpenAiHandler(BaseHTTPRequestHandler):
     seen: list = []
     seen_get: list = []   # 리다이렉트를 따라온 요청(POST→GET 변환)을 관측한다
+    seen_headers: list = []
     script: list = []
 
     def do_GET(self):  # noqa: N802
@@ -176,6 +307,7 @@ class _OpenAiHandler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         _OpenAiHandler.seen.append((self.path, self.headers.get("Authorization"), body))
+        _OpenAiHandler.seen_headers.append(dict(self.headers.items()))
         status, payload = _OpenAiHandler.script.pop(0) if _OpenAiHandler.script else (200, None)
         if payload is None:
             payload = {"choices": [{"message": {"content": "분석 결과"}}], "model": "gpt-oss-x",
@@ -192,7 +324,7 @@ class _OpenAiHandler(BaseHTTPRequestHandler):
 
 @pytest.fixture
 def openai_server():
-    _OpenAiHandler.seen, _OpenAiHandler.seen_get, _OpenAiHandler.script = [], [], []
+    _OpenAiHandler.seen, _OpenAiHandler.seen_get, _OpenAiHandler.seen_headers, _OpenAiHandler.script = [], [], [], []
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _OpenAiHandler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_port}/v1", _OpenAiHandler
@@ -214,6 +346,45 @@ def test_client_request_shape_and_response_parsing(openai_server):
         {"role": "system", "content": "SYS"}, {"role": "user", "content": "USER"}]
     assert body["max_tokens"] == 4000 and "temperature" not in body        # 신형 모델이 거부하는 샘플링 파라미터는 보내지 않는다
     assert (res.text, res.model, res.prompt_tokens, res.completion_tokens) == ("분석 결과", "gpt-oss-x", 5, 7)
+
+
+def test_custom_headers_reach_local_http_server_and_retry_unchanged(openai_server):
+    url, h = openai_server
+    h.script = [(400, {"error": {"message": "Use max_completion_tokens"}})]
+    config = AiConfig(base_url=url, model="gpt-oss", trust_zone="internal", api_key="",
+                      extra_headers=(("X-Gateway-Key", "header-secret-91"), ("api-key", "second-secret")))
+    OpenAICompatClient(config, UrllibAiHttp()).complete("s", "u")
+    assert len(h.seen_headers) == 2
+    for received in h.seen_headers:
+        normalized = {name.casefold(): value for name, value in received.items()}
+        assert normalized["x-gateway-key"] == "header-secret-91" and normalized["api-key"] == "second-secret"
+
+
+def test_custom_authorization_header_is_sent_when_bearer_api_key_is_absent(openai_server):
+    url, h = openai_server
+    config = AiConfig(base_url=url, model="gpt-oss", trust_zone="internal",
+                      extra_headers=(("aUtHoRiZaTiOn", "Basic custom-secret"),))
+    OpenAICompatClient(config, UrllibAiHttp()).complete("s", "u")
+    assert h.seen_headers[0]["Authorization"] == "Basic custom-secret"
+
+
+def test_all_custom_header_values_are_redacted_from_provider_and_network_errors(openai_server):
+    url, h = openai_server
+    h.script = [(422, {"error": {"message": "echo header-secret-91 and second-secret"}})]
+    config = AiConfig(base_url=url, model="gpt-oss", trust_zone="internal",
+                      extra_headers=(("X-Gateway-Key", "header-secret-91"), ("api-key", "second-secret")))
+    with pytest.raises(LlmError) as ei:
+        OpenAICompatClient(config, UrllibAiHttp()).complete("s", "u")
+    assert "header-secret-91" not in str(ei.value) and "second-secret" not in str(ei.value)
+    assert "***" in str(ei.value)
+
+    class BrokenHttp(AiHttp):
+        def post_json(self, url, body, headers, timeout):
+            raise OSError("proxy echoed header-secret-91 and second-secret")
+
+    with pytest.raises(LlmError) as ei:
+        OpenAICompatClient(config, BrokenHttp()).complete("s", "u")
+    assert "header-secret-91" not in str(ei.value) and "second-secret" not in str(ei.value)
 
 
 def test_keyless_internal_gateway_sends_no_authorization_header(openai_server):
@@ -268,7 +439,7 @@ def test_internal_gateway_with_self_signed_cert_needs_verify_off_or_ca(tmp_path)
                                     "extendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\n")
     subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "k.pem", "-out", "c.pem",
                     "-days", "2", "-config", "c.cnf"], cwd=tmp_path, check=True, capture_output=True)
-    _OpenAiHandler.seen, _OpenAiHandler.script = [], []
+    _OpenAiHandler.seen, _OpenAiHandler.seen_headers, _OpenAiHandler.script = [], [], []
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _OpenAiHandler)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(tmp_path / "c.pem", tmp_path / "k.pem")

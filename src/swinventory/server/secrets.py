@@ -48,6 +48,10 @@ class SecretBox:
             return plaintext
         return PREFIX + self._fernet.encrypt(plaintext.encode("utf-8")).decode("ascii")
 
+    def encrypt_literal(self, plaintext: str) -> str:
+        """입력 문자열을 항상 암호화한다. `enc:v1:` 로 시작하는 사용자 비밀도 그대로 저장·복호화한다."""
+        return PREFIX + self._fernet.encrypt(plaintext.encode("utf-8")).decode("ascii")
+
     def decrypt(self, value: str) -> str:
         if not value.startswith(PREFIX):
             return value

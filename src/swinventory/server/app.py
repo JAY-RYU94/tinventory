@@ -100,7 +100,7 @@ def create_app(repo: InventoryRepository, settings: ApiSettings,
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, exc):
         # Pydantic 기본 오류의 input 에 로그인 비밀번호·비밀 필드가 반사되지 않게 한다.
-        if request.url.path.startswith(("/v1/auth/", "/v1/users", "/v1/tokens")):
+        if request.url.path == "/v1/settings/ai" or request.url.path.startswith(("/v1/auth/", "/v1/users", "/v1/tokens")):
             return JSONResponse(status_code=422, content={"detail": "입력값의 형식과 길이를 확인하세요."})
         return await request_validation_exception_handler(request, exc)
 

@@ -3,6 +3,7 @@
 
     python3 scripts/fake_openai.py --port 8199      # 서버 설정: base_url http://127.0.0.1:8199/v1, trust_zone internal
 요청의 Authorization 헤더 유무와 모델명은 stdout 에 기록한다(키 값 자체는 기록하지 않는다).
+선택적으로 지정한 사용자 헤더 값이 일치하는지도 값 자체를 남기지 않고 기록한다.
 """
 from __future__ import annotations
 
@@ -26,8 +27,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         auth = self.headers.get("Authorization")
+        expected_header = getattr(self.server, "expect_header_name", "")
+        header_ok = (self.headers.get(expected_header) == self.server.expect_header_value) if expected_header else "n/a"
         print(f"POST {self.path} model={body.get('model')} auth={'Bearer ***' if auth else 'none'} "
-              f"key_ok={auth == 'Bearer ' + (self.server.expect_key or '') if self.server.expect_key else 'n/a'}", flush=True)
+              f"key_ok={auth == 'Bearer ' + (self.server.expect_key or '') if self.server.expect_key else 'n/a'} "
+              f"custom_header_ok={header_ok}", flush=True)
         text = write_report(body["messages"][1]["content"]) if len(body.get("messages", [])) > 1 else "OK"
         out = json.dumps({"choices": [{"message": {"content": text}}], "model": body.get("model"),
                           "usage": {"prompt_tokens": 100, "completion_tokens": 50}}).encode()
@@ -45,8 +49,13 @@ if __name__ == "__main__":
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8199)
     ap.add_argument("--expect-key", default="", help="이 키가 Bearer 로 오는지 로그에 true/false 로 남긴다")
+    ap.add_argument("--expect-header", default="", help="name=value 형식으로 수신 여부만 확인하며 값은 기록하지 않는다")
     a = ap.parse_args()
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     srv.expect_key = a.expect_key
+    if "=" in a.expect_header:
+        srv.expect_header_name, srv.expect_header_value = a.expect_header.split("=", 1)
+    else:
+        srv.expect_header_name, srv.expect_header_value = "", ""
     print(f"fake openai on {a.host}:{a.port}", flush=True)
     srv.serve_forever()

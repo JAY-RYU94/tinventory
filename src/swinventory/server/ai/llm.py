@@ -24,6 +24,7 @@ class AiConfig:
     ca_file: str | None = None      # 사내 게이트웨이의 사설 CA — 검증을 끄는 것보다 낫다
     timeout: float = 120.0
     max_tokens: int = 4000
+    extra_headers: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -84,18 +85,31 @@ class OpenAICompatClient(LlmClient):
         self._http = http
 
     def _redact(self, text: str) -> str:
-        key = self._cfg.api_key
-        return text.replace(key, "***") if key else text
+        secrets = [self._cfg.api_key, *(value for _, value in self._cfg.extra_headers)]
+        for secret in sorted({value for value in secrets if value}, key=len, reverse=True):
+            text = text.replace(secret, "***")
+        return text
 
     def _post(self, body: dict) -> tuple[int, bytes]:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self._cfg.api_key:  # 키가 없는 사내 게이트웨이(로컬 Ollama 등)는 헤더를 보내지 않는다
             headers["Authorization"] = f"Bearer {self._cfg.api_key}"
+        seen = {name.casefold() for name in headers}
+        for name, value in self._cfg.extra_headers:
+            folded = name.casefold()
+            if folded in seen:
+                if folded == "authorization" and self._cfg.api_key:
+                    raise LlmError("추가 Authorization 헤더와 API 키 Bearer 가 충돌한다 — 하나만 설정한다")
+                raise LlmError("추가 HTTP 헤더 이름이 중복됐다 — 설정을 확인한다")
+            seen.add(folded)
+            headers[name] = value
         url = self._cfg.base_url.rstrip("/") + "/chat/completions"
         try:
             return self._http.post_json(url, body, headers, self._cfg.timeout)
         except (OSError, TimeoutError) as exc:
             raise LlmError(f"LLM 엔드포인트에 연결하지 못했다: {self._redact(type(exc).__name__ + ': ' + str(exc))[:200]}") from None
+        except (ValueError, UnicodeError):
+            raise LlmError("추가 HTTP 헤더 형식이 올바르지 않다 — 설정을 확인한다") from None
 
     def complete(self, system: str, user: str) -> LlmResult:
         body: dict = {"model": self._cfg.model, "max_tokens": self._cfg.max_tokens,

@@ -2533,13 +2533,140 @@
     const timeout = h("input", { type: "number", value: f("timeout", 120), min: 1, max: 600 });
     const maxTokens = h("input", { type: "number", value: f("max_tokens", 4000), min: 256, max: 16000 });
     const msg = msgBox();
+    const headerRows = [];
+    const headerList = h("div", { class: "ai-header-list", "aria-label": "추가 HTTP 헤더 목록" });
+    const authHeader = h("select", { id: "ai-auth-header", "aria-label": "사용자 인증 헤더", onchange: () => msg.clear() },
+      h("option", { value: "" }, "사용 안 함"));
+    const originNotice = h("p", { class: "notice ai-origin-notice", role: "status", hidden: true });
+    const initialBaseUrl = String(f("base_url") || "");
+    let savedBaseUrl = initialBaseUrl;
+    let busy = false;
+    let saveButton;
+    let addHeaderButton;
+    const normalizedName = (v) => String(v || "").trim().toLowerCase();
+    const headerToken = /^[!#$%&'*+\-.^_\x60|~0-9A-Za-z]+$/;
+    const reservedHeaders = new Set(["accept", "connection", "content-length", "content-type", "expect", "host", "keep-alive",
+      "proxy-authenticate", "proxy-authorization", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade"]);
+    const originOf = (value) => {
+      try { return new URL(String(value || "").trim()).origin; } catch (_) { return ""; }
+    };
+    const updateOriginNotice = () => {
+      const changed = !!savedBaseUrl && !!baseUrl.value.trim() && originOf(savedBaseUrl) !== originOf(baseUrl.value);
+      const preserved = headerRows.some((row) => row.hasValue && !row.valueInput.value);
+      originNotice.hidden = !(changed && preserved);
+      originNotice.textContent = "엔드포인트의 scheme·호스트·포트가 바뀌었습니다. 저장된 헤더 비밀값은 새 주소로 옮기지 않으므로, 유지할 각 행에 새 값을 입력하거나 해당 행을 삭제하세요.";
+    };
+    const updateAuthOptions = () => {
+      const wanted = authHeader.value;
+      const seen = new Set();
+      const options = [h("option", { value: "" }, "사용 안 함")];
+      for (const row of headerRows) {
+        const name = row.nameInput.value.trim();
+        const keyName = normalizedName(name);
+        if (!keyName || seen.has(keyName)) continue;
+        seen.add(keyName);
+        options.push(h("option", { value: name }, name));
+      }
+      clear(authHeader).append(...options);
+      authHeader.value = options.some((option) => option.value && normalizedName(option.value) === normalizedName(wanted))
+        ? options.find((option) => option.value && normalizedName(option.value) === normalizedName(wanted)).value : "";
+    };
+    const updateHeaderLabels = () => {
+      headerRows.forEach((row, index) => {
+        const name = row.nameInput.value.trim();
+        row.removeButton.setAttribute("aria-label", `${name || `추가 헤더 ${index + 1}`} 삭제`);
+      });
+    };
+    const makeHeaderRow = (item = {}) => {
+      const rowId = uid("ai-header");
+      const nameInput = h("input", { id: `${rowId}-name`, type: "text", autocomplete: "off", spellcheck: "false", maxlength: 128,
+        value: item.name || "", placeholder: "예: X-Organization-Key", "aria-describedby": `${rowId}-name-hint ${rowId}-name-error` });
+      const valueInput = h("input", { id: `${rowId}-value`, type: "password", autocomplete: "new-password", spellcheck: "false", maxlength: 4096,
+        placeholder: item.has_value ? "저장된 값 유지 — 교체할 때만 입력" : "헤더 값", "aria-describedby": `${rowId}-value-hint ${rowId}-value-error` });
+      const nameError = h("div", { class: "field-error", id: `${rowId}-name-error`, role: "alert" });
+      const valueError = h("div", { class: "field-error", id: `${rowId}-value-error`, role: "alert" });
+      const saved = h("span", { class: "ai-header-state" }, item.has_value ? "저장됨 · 값은 다시 표시되지 않습니다" : "값 미설정");
+      const removeButton = gate(h("button", { type: "button", class: "danger", "aria-label": "추가 헤더 삭제" }, "삭제"));
+      const row = { element: null, nameInput, valueInput, nameError, valueError, removeButton,
+        originalName: String(item.name || ""), hasValue: item.has_value === true, saved };
+      const nameField = h("div", { class: "ai-header-field" },
+        h("label", { for: nameInput.id }, "헤더 이름"), nameInput, nameError,
+        h("span", { class: "hint", id: `${rowId}-name-hint` }, "공백 없이 헤더 이름을 입력하세요."));
+      const valueField = h("div", { class: "ai-header-field" },
+        h("label", { for: valueInput.id }, "헤더 값"), valueInput, valueError,
+        h("span", { class: "hint", id: `${rowId}-value-hint` }, item.has_value ? "비워두면 같은 이름의 저장값을 유지합니다." : "빈 값도 저장할 수 있습니다."));
+      row.element = h("div", { class: "ai-header-row" }, h("div", { class: "ai-header-fields" }, nameField, valueField),
+        h("div", { class: "ai-header-actions" }, saved, removeButton));
+      removeButton.addEventListener("click", () => {
+        const index = headerRows.indexOf(row);
+        if (index >= 0) headerRows.splice(index, 1);
+        row.element.remove(); updateAuthOptions(); updateHeaderLabels(); updateOriginNotice(); msg.clear();
+      });
+      nameInput.addEventListener("input", () => { nameError.textContent = ""; nameInput.removeAttribute("aria-invalid"); updateAuthOptions(); updateHeaderLabels(); updateOriginNotice(); msg.clear(); });
+      valueInput.addEventListener("input", () => { valueError.textContent = ""; valueInput.removeAttribute("aria-invalid"); updateOriginNotice(); msg.clear(); });
+      headerRows.push(row);
+      headerList.append(row.element);
+      return row;
+    };
+    for (const row of (Array.isArray(ai.extra_headers) ? ai.extra_headers : [])) makeHeaderRow(row);
+    updateAuthOptions(); updateHeaderLabels();
+    authHeader.value = ai.auth_header || "";
+    updateOriginNotice();
+    addHeaderButton = gate(h("button", { type: "button", onclick: () => {
+      if (headerRows.length >= 32) { msg.err("추가 HTTP 헤더는 최대 32개까지 설정할 수 있습니다."); return; }
+      const row = makeHeaderRow(); updateAuthOptions(); updateHeaderLabels(); row.nameInput.focus(); msg.clear();
+    } }, "+ 헤더 추가"));
+    baseUrl.addEventListener("input", updateOriginNotice);
     const save = async () => {
+      if (busy) return;
+      const seenHeaders = new Set();
+      for (const row of headerRows) {
+        row.nameError.textContent = ""; row.nameInput.removeAttribute("aria-invalid");
+        row.valueError.textContent = ""; row.valueInput.removeAttribute("aria-invalid");
+        const rawName = row.nameInput.value;
+        const currentName = rawName.trim();
+        const keyName = normalizedName(currentName);
+        let nameError = "";
+        if (!currentName) nameError = "헤더 이름을 입력하세요.";
+        else if (rawName !== currentName) nameError = "헤더 이름 앞뒤에 공백을 넣을 수 없습니다.";
+        else if (currentName.length > 128 || !headerToken.test(currentName)) nameError = "공백 없이 영문·숫자와 HTTP 헤더에 허용된 기호를 입력하세요.";
+        else if (reservedHeaders.has(keyName)) nameError = "요청 전송에 예약된 헤더 이름은 사용할 수 없습니다.";
+        else if (seenHeaders.has(keyName)) nameError = "헤더 이름은 대소문자를 구분하지 않고 중복할 수 없습니다.";
+        if (nameError) {
+          row.nameError.textContent = nameError; row.nameInput.setAttribute("aria-invalid", "true"); row.nameInput.focus();
+          msg.err("헤더 이름을 확인하세요."); return;
+        }
+        seenHeaders.add(keyName);
+        if (row.hasValue && normalizedName(currentName) !== normalizedName(row.originalName) && !row.valueInput.value) {
+          row.valueError.textContent = "저장된 비밀값은 다른 헤더 이름으로 이동할 수 없습니다. 새 이름에 사용할 값을 입력하세요.";
+          row.valueInput.setAttribute("aria-invalid", "true"); row.valueInput.focus();
+          msg.err("헤더 이름을 바꾼 행에는 새 값을 입력해야 합니다.");
+          return;
+        }
+      }
+      busy = true; saveButton.disabled = true; addHeaderButton.disabled = true;
+      headerRows.forEach((row) => { row.removeButton.disabled = true; });
       msg.info("저장 중…");
       const body = { base_url: baseUrl.value.trim(), model: model.value.trim(), trust_zone: zone.value, api_key: key.value || null,
         clear_api_key: clearKey.checked, verify_ssl: verify.value === "off" ? false : null, ca_file: ca.value.trim() || null,
-        timeout: Number(timeout.value), max_tokens: Number(maxTokens.value) };
-      try { await api("/v1/settings/ai", { method: "PUT", body: JSON.stringify(body) }); key.value = ""; clearKey.checked = false; msg.ok("저장했습니다. '연결 테스트'로 확인하세요."); }
+        timeout: Number(timeout.value), max_tokens: Number(maxTokens.value), auth_header: authHeader.value || null,
+        extra_headers: headerRows.map((row) => ({ name: row.nameInput.value.trim(),
+          value: row.valueInput.value || (row.hasValue ? null : "") })) };
+      try {
+        const savedConfig = await api("/v1/settings/ai", { method: "PUT", body: JSON.stringify(body) });
+        key.value = ""; clearKey.checked = false;
+        savedBaseUrl = String(savedConfig.base_url || baseUrl.value.trim());
+        if (Array.isArray(savedConfig.extra_headers)) {
+          headerRows.splice(0, headerRows.length);
+          clear(headerList);
+          for (const row of savedConfig.extra_headers) makeHeaderRow(row);
+          updateAuthOptions(); updateHeaderLabels();
+          authHeader.value = savedConfig.auth_header || "";
+        }
+        updateOriginNotice(); msg.ok("저장했습니다. 비밀 입력란은 비웠습니다. 연결 테스트는 저장된 설정을 사용합니다.");
+      }
       catch (err) { msg.err(errMsg(err)); }
+      finally { busy = false; saveButton.disabled = !isAdmin(); addHeaderButton.disabled = !isAdmin(); headerRows.forEach((row) => { row.removeButton.disabled = !isAdmin(); }); }
     };
     const test = async () => {
       msg.info("테스트 중…");
@@ -2553,9 +2680,18 @@
           field("엔드포인트(base_url)", baseUrl), field("모델", model), field("신뢰 영역", zone),
           field("API 키", key), field("저장된 키 삭제", clearKey, "체크하고 저장하면 저장된 API 키를 지웁니다."),
           field("TLS 검증", verify), field("사설 CA 파일", ca),
-          field("타임아웃(초)", timeout), field("최대 출력 토큰", maxTokens)),
+          field("타임아웃(초)", timeout), field("최대 출력 토큰", maxTokens),
+          h("section", { class: "ai-extra-headers full", "aria-labelledby": "ai-extra-headers-title" },
+            h("div", { class: "ai-extra-heading" }, h("div", null, h("h3", { id: "ai-extra-headers-title" }, "추가 HTTP 헤더"),
+              h("p", { class: "hint" }, "프록시·사내 게이트웨이용 헤더를 최대 32개까지 설정합니다. 값은 암호화 저장되며 다시 표시되지 않습니다.")), addHeaderButton),
+            headerList,
+            h("div", { class: "ai-auth-row" }, h("label", { for: "ai-auth-header" }, "사용자 인증 헤더"),
+              authHeader),
+            h("p", { class: "hint" }, "외부 엔드포인트는 API 키 또는 여기서 선택한 비어 있지 않은 헤더 값이 필요합니다. 추가 Authorization 헤더는 API 키와 함께 사용할 수 없습니다."),
+            originNotice)),
         h("p", { class: "hint" }, "external 은 https 만 허용되고 TLS 검증을 끌 수 없습니다. 엔드포인트 URL 에 자격증명(user:pw@, ?api_key=)을 넣을 수 없습니다."),
-        h("div", { class: "toolbar" }, h("button", { class: "primary", type: "button", onclick: save }, "저장"), h("button", { type: "button", onclick: test }, "연결 테스트"), msg.el)));
+        h("p", { class: "hint" }, "연결 테스트는 현재 저장된 설정만 사용합니다. 변경사항은 먼저 저장하세요."),
+        h("div", { class: "toolbar" }, saveButton = gate(h("button", { class: "primary", type: "button", onclick: save }, "저장")), gate(h("button", { type: "button", onclick: test }, "연결 테스트")), msg.el)));
   }
 
   function setMenu(open) {

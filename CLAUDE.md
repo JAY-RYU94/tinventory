@@ -53,7 +53,7 @@ PYTHONPATH=src python3 -m swinventory.server.contract --write   # 계약 스키�
 
 ## 범위·확장
 
-- 이번 범위 밖: CVE/취약점, 컨테이너 이미지, 프론트엔드. 이벤트는 `subject_type`/`subject_key` 로 일반화돼 있어 새 대상을 같은 테이블에 담을 수 있다.
+- 이번 범위 밖: 컨테이너 이미지. 이벤트는 `subject_type`/`subject_key` 로 일반화돼 있어 새 대상을 같은 테이블에 담을 수 있다.
   취약점은 `(source, name, version)` 를 조인 키로 별도 테이블에 붙인다.
 - Windows 에이전트는 C#(`windows-agent/`). `contracts/` 스키마와 Python `collectors/windows.py` 의 수집 규칙(Uninstall 필터, `10.0.<build>.<UBR>`, 재부팅 키)이 명세이고, 두 구현은 **같이 고친다**.
 - 소유팀·환경은 수집이 아니라 서버의 자산 메타데이터(`host_tags`)로 관리한다.
@@ -67,9 +67,10 @@ PYTHONPATH=src python3 -m swinventory.server.contract --write   # 계약 스키�
 - **커널 하한선**(`server/policy.py`): OS 계열별 최소 커널, **실행 중 커널 기준**, 숫자 토큰 비교(`5.15.0-91 < 5.15.0-100`). 계열 규칙이 `*` 보다 우선.
   DB 설정(`app_settings`)에 저장하고 요청마다 읽어 **저장 즉시 반영**된다. 정책이 없거나 커널 정보가 없으면 `compliant` 는 `None`(판정 안 함 — False 와 구분한다).
   저장값이 손상되면 "정책 없음"으로 본다(아무도 미달로 표시하지 않음 — 잘못된 경보보다 안전).
-- **AI 연결 설정**(`server/ai/config.py`)은 tclient 의 사내 엔드포인트 규약을 따른다: 신뢰 영역(`internal`/`external`), external 은 https 필수·TLS 검증 해제 불가·키 필수,
+- **AI 연결 설정**(`server/ai/config.py`)은 tclient 의 사내 엔드포인트 규약을 따른다: 신뢰 영역(`internal`/`external`), external 은 https 필수·TLS 검증 해제 불가·API 키 또는 명시적으로 선택한 사용자 인증 헤더 필수,
   URL 에 자격증명(user:pw@, `?api_key=`) 금지, 링크 로컬(169.254.x.x)·메타데이터 호스트 금지, `SWINV_AI_ENDPOINT_ALLOWLIST`, `OPENAI_API_KEY` 폴백.
   **API 키는 쓰기 전용**: Fernet 암호문(`enc:v1:`)만 DB 에 저장하고 응답엔 `has_api_key`/출처만. 빈 키로 저장하면 기존 키 유지, 지우려면 `clear_api_key`.
+  추가 HTTP 헤더(최대 32개·16 KiB)는 RFC 9110의 헤더 이름 규칙과 HTTP 전송 가능 값 범위를 검증하고 값은 반드시 암호화한다. GET 은 이름과 `has_value`만 반환한다. API 의 `null`/생략 값은 같은 이름(대소문자 무시)의 기존 값만 보존하고, `""`는 빈 값, 행 생략은 삭제다. 새 이름에 `null`/생략을 보내면 값 없는 헤더가 되므로 기존 이름을 바꿀 때는 새 값을 입력해야 한다. 화면에서 기존 값 입력칸을 비우는 동작은 보존이고, 행 삭제는 제거다. 외부 인증은 사용자 지정 헤더를 명시적으로 선택해야 하며 일반 메타데이터 헤더만으로 외부 인증 요건을 만족시키지 않는다. API 키의 Bearer `Authorization`과 사용자 `Authorization`이 겹치면 저장을 거부한다(`OPENAI_API_KEY` 폴백도 포함). scheme/host/port origin 변경 시 남기는 헤더 비밀값을 새로 입력해야 하고 삭제한 행만 제거한다(같은 origin 의 경로 변경은 유지).
   암호화 키는 `SWINV_SECRET_KEY` 또는 키 파일(`SWINV_SECRET_FILE`, 0600, 없으면 생성). **키를 잃으면 저장된 AI 키는 복호화할 수 없다**(재입력) — Docker 는 `/data` 볼륨에 둔다.
 - **AI 리포트**(`server/ai/{facts,prompt,service}.py`): 계산은 서버가 하고(`build_facts`) LLM 은 그 숫자로 서술만 한다. 총계는 정확히, 목록만 상한(`CAP_*`)으로 자른다.
   - **프롬프트 인젝션 방어(다층)**: 호스트명·태그·오류 문자열은 신뢰할 수 없는 데이터다. ① 수집·태그 입력 단계에서 제어문자 제거/거부 ② `facts.clean()` 이 한 번 더 정제·길이 제한
@@ -77,9 +78,10 @@ PYTHONPATH=src python3 -m swinventory.server.contract --write   # 계약 스키�
   - 동시에 하나만 생성(프로세스 단위 잠금, 비용·중복 방지). LLM 실패는 502 이고 **저장하지 않는다**. 리포트에는 근거 facts 를 함께 보관한다.
   - LLM 출력도 신뢰하지 않는다: 화면은 자체 마크다운 렌더러(요소 직접 생성, 링크·HTML 은 텍스트로만)로 그린다.
   - 신형 모델은 `max_tokens` 를 거부하고 `max_completion_tokens` 를 요구하는 경우가 있어 400 응답 시 1회 자동 전환한다. temperature 등 샘플링 파라미터는 보내지 않는다.
-  - 리다이렉트는 따르지 않는다(Authorization 으로 키가 유출된다). 오류 메시지·로그에 키를 싣지 않고 제공자 메시지 안의 키도 마스킹한다.
+  - 리다이렉트는 따르지 않는다(Authorization 으로 비밀값이 유출된다). 오류 메시지·로그에 API 키·추가 헤더 값을 싣지 않고 제공자 메시지 안의 값도 마스킹한다.
 - **입력 경계(PostgreSQL 때문에 존재)**: PG 텍스트 컬럼은 NUL(`\x00`)을 저장하지 못해 SQLite 에서 안 보이던 500 이 난다.
   수집 문자열은 **제거하고 받는다**(거부하면 패키지명 하나가 호스트 전체의 수집을 막는다 — 제거는 길이 검증보다 먼저), 관리자 입력(태그·AI 설정)은 422, URL 의 `%00` 은 400(`RejectNulMiddleware`).
+- **NVD 페이지 커서**: `vulnerability_feed_status.data_version` 은 NVD 의 불투명한 페이지 커서와 완료 정보를 보존해야 한다. 짧은 문자열 길이 제한이나 절단을 추가하지 않고, 기존 PostgreSQL `VARCHAR(64)` 는 서버 시작 때 값 보존하며 `TEXT` 로 확장한다. 스키마 변경은 SQLite 와 PostgreSQL 회귀 테스트로 검증한다.
 - **동시 적재**: 같은 스냅샷/호스트가 동시에 오면 유니크 위반 → `ConflictError` → 롤백 후 1회 재시도로 `duplicate` 에 수렴. PostgreSQL 경합 테스트가 이를 강제한다(SQLite 인메모리는 경합이 없어 못 잡는다).
 - **삭제 순서(FK)**: 호스트 삭제·prune 은 events(→snapshots) → 자식 → snapshots → hosts. prune 은 남는 이벤트의 `snapshot_id` 를 먼저 NULL 로 만든다.
 - **화면**(`server/web/`): 빌드 없는 정적 파일. **`innerHTML` 금지**(`tests/server/test_ops.py` 가 코드에서 강제, 주석은 제외), CSP 는 `default-src 'self'`(인라인 스크립트·스타일 금지 — 스타일은 CSSOM 으로 대입).
@@ -118,6 +120,7 @@ PYTHONPATH=src python3 -m swinventory.server.contract --write   # 계약 스키�
 - **보안**: 리다이렉트 비추종(`AllowAutoRedirect = false`), 사설 CA 를 지정해도 호스트명·인증서 없음 오류는 거부하고 체인만 커스텀 CA 로 재검증, 토큰은 오류 메시지·`doctor` 출력에서 마스킹, 설정 오류 메시지에 토큰·키 내용 금지, 스풀 디렉터리는 Unix 에서 0700(Windows 는 `install.ps1` 의 ACL).
 - **`doctor` 의 서버 점검은 빈 본문 `{}` POST**: 서버가 인증을 본문 검증보다 먼저 하므로 422=정상, 401=토큰 거부, 403=수집 권한 없음. 서버에 저장되지 않는다. 서버의 인증/검증 순서를 바꾸면 이 판정이 깨지므로 `e2e_windows_agent.sh` 로 확인한다.
 - **Windows 실기에서 아직 검증되지 않은 것**: `WindowsRegistryReader`, `Get-HotFix` 실제 출력·LOCAL SERVICE 권한, `install.ps1` 실행(ACL·예약 작업), SChannel 의 PEM 클라이언트 인증서 로딩, 트리밍된 Windows 바이너리 실행. 이 목록이 줄어들기 전에 "검증됨"이라고 쓰지 않는다.
+- `install.ps1` 에 한국어 등 비 ASCII 문자가 있으면 Windows PowerShell 5.1 이 ANSI 로 오해하지 않도록 UTF-8 BOM 을 보존한다. 첫 수집 `print` 의 stdout 폐기·stderr 경고·종료 코드 경로는 PowerShell 7 Linux 컨테이너에서만 검증하며, 이는 Windows PowerShell 5.1 이나 Windows 설치 실행 검증을 뜻하지 않는다.
 - 이 작업에서 실제로 잡힌 함정: 테스트 헬퍼가 상세 문구의 단어에 걸림(점검 이름 접두로 찾는다), `set -o pipefail` 의 `echo | grep -q` SIGPIPE(here-string 사용), 도달 불가 코드 경고가 변이를 컴파일 오류로 만듦(컴파일되는 형태로 변이를 쓴다), 호스트의 `rm -f dir/*` 가 안전 검사에 막힘(결과 파일은 덮어쓰기로 충분).
 
 ## 서버 등록(에이전트 배포·설치 명령) 규칙

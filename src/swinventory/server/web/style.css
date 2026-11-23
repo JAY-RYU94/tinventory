@@ -103,6 +103,23 @@ dl.kv { display: grid; grid-template-columns: 110px 1fr; gap: 4px 12px; margin: 
 .field-error { color: var(--err); font-size: 12px; margin: 4px 0 0; }
 .rules { margin: 10px 0; }
 .rule { display: grid; grid-template-columns: 200px 1fr auto; gap: 8px; margin-bottom: 8px; max-width: 760px; }
+.ai-extra-headers { min-width: 0; margin-top: 8px; padding-top: 14px; border-top: 1px solid var(--line); }
+.ai-extra-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
+.ai-extra-heading h3 { margin: 0; font-size: 14px; }
+.ai-extra-heading p { margin: 3px 0 0; }
+.ai-header-list { display: grid; gap: 10px; min-width: 0; }
+.ai-header-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.ai-header-fields { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 10px 14px; min-width: 0; }
+.ai-header-field { display: grid; align-content: start; gap: 4px; min-width: 0; }
+.ai-header-field label, .ai-auth-row label { color: var(--muted); }
+.ai-header-field input { width: 100%; min-width: 0; }
+.ai-header-field .hint { margin: 0; }
+.ai-header-actions { display: grid; justify-items: end; gap: 6px; min-width: 135px; }
+.ai-header-state { color: var(--muted); font-size: 12px; text-align: right; }
+.ai-auth-row { display: grid; grid-template-columns: 160px minmax(0, 1fr); align-items: center; gap: 10px 14px; margin: 14px 0 8px; }
+.ai-auth-row select { width: 100%; }
+.ai-extra-headers > .notice { margin: 10px 0 0; }
+.ai-extra-headers > .hint { margin: 8px 0; }
 .result-ok { color: var(--ok); } .result-err { color: var(--err); }
 .msg { display: inline-block; }
 .md h2, .md h3, .md h4 { margin: 20px 0 8px; } .md h2 { font-size: 17px; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
@@ -144,6 +161,10 @@ td.asset, td.os { min-width: 11em; }
   .card .value { font-size: 22px; }
   .form, .rule, .enroll-grid, .grid2 { grid-template-columns: 1fr; }
   .form label { margin-top: 4px; }
+  .ai-extra-heading { align-items: flex-start; flex-direction: column; }
+  .ai-header-row, .ai-header-fields, .ai-auth-row { grid-template-columns: minmax(0, 1fr); }
+  .ai-header-actions { display: flex; align-items: center; justify-content: space-between; min-width: 0; }
+  .ai-header-state { text-align: left; }
   dl.kv { grid-template-columns: 1fr; gap: 0; }
   dl.kv dt { margin-top: 8px; font-size: 12px; }
   .bar { grid-template-columns: minmax(80px, 36%) 1fr 36px; gap: 8px; }

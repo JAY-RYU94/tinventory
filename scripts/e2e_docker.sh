@@ -202,12 +202,12 @@ nc=$(get /v1/overview | jq_ "d['noncompliant_count']")
 get "/v1/kernels/hosts?compliant=false" | jq_ "sorted(h['hostname'] for h in d)" | grep -q "e2e-debian.*e2e-ubuntu" && pass "미달 필터 결과가 두 debian 계열 호스트" || bad "미달 필터"
 
 docker run -d --name swinv-e2e-llm --network $NET -v "$PWD/scripts/fake_openai.py:/f.py:ro" python:3.12-slim \
-  python /f.py --host 0.0.0.0 --port 8199 --expect-key sk-e2e-secret >/dev/null
+  python /f.py --host 0.0.0.0 --port 8199 --expect-key sk-e2e-secret --expect-header X-E2E-Gateway=e2e-header-secret >/dev/null
 for i in $(seq 1 30); do docker logs swinv-e2e-llm 2>&1 | grep -q "fake openai on" && break; sleep 1; done
-adm -X PUT $API/v1/settings/ai -d '{"base_url":"http://swinv-e2e-llm:8199/v1","model":"fake-model","trust_zone":"internal","api_key":"sk-e2e-secret"}' >/tmp/swinv-e2e-ai.json
-grep -q "sk-e2e-secret" /tmp/swinv-e2e-ai.json && bad "AI 설정 응답에 키 노출" || pass "AI 설정 응답에 키가 없음"
+adm -X PUT $API/v1/settings/ai -d '{"base_url":"http://swinv-e2e-llm:8199/v1","model":"fake-model","trust_zone":"internal","api_key":"sk-e2e-secret","extra_headers":[{"name":"X-E2E-Gateway","value":"e2e-header-secret"}],"auth_header":"X-E2E-Gateway"}' >/tmp/swinv-e2e-ai.json
+grep -Eq "sk-e2e-secret|e2e-header-secret" /tmp/swinv-e2e-ai.json && bad "AI 설정 응답에 인증값 노출" || pass "AI 설정 응답에 키와 추가 헤더 값이 없음"
 raw=$(docker compose -p $P exec -T db psql -U swinv -d swinv -tAc "select value from app_settings where key='ai_config'")
-if echo "$raw" | grep -q "enc:v1:" && ! echo "$raw" | grep -q "sk-e2e-secret"; then pass "PostgreSQL 에는 API 키가 암호문(enc:v1:)으로만 저장됨"; else bad "DB 저장 형식: $raw"; fi
+if echo "$raw" | grep -q "enc:v1:" && ! echo "$raw" | grep -E -q "sk-e2e-secret|e2e-header-secret"; then pass "PostgreSQL 에는 API 키와 추가 헤더 값이 암호문으로만 저장됨"; else bad "DB 저장 형식에 평문 인증값이 있음"; fi
 
 docker compose -p $P up -d --force-recreate server >/dev/null 2>&1      # 컨테이너를 새로 만들어도 /data 볼륨의 키로 복호화돼야 한다
 for i in $(seq 1 60); do curl -fsS $API/healthz >/dev/null 2>&1 && break; sleep 1; done
@@ -218,6 +218,9 @@ echo "$rep" | grep -q "전체 3대" && echo "$rep" | grep -q "하한선 미달 2
 [ "$(get /v1/reports | jq_ "len(d)")" = "1" ] && pass "리포트가 PostgreSQL 에 저장됨" || bad "리포트 저장"
 [ "$(get /v1/reports/facts | jq_ "d['network']['notable_exposed_ports'][0]['port']")" = "6379" ] && pass "AI 근거 집계에 노출된 redis(6379)가 포함됨" || bad "AI 집계의 네트워크"
 docker logs swinv-e2e-llm 2>&1 | grep "POST /v1/chat/completions" | grep -q "key_ok=True" && pass "LLM 엔드포인트가 복호화된 API 키를 Bearer 로 받음(키는 로그에 남기지 않음)" || bad "LLM 이 올바른 키를 못 받음"
+custom_header_hits=$(docker logs swinv-e2e-llm 2>&1 | grep -c "custom_header_ok=True" || true)
+[ "$custom_header_hits" -ge 2 ] && pass "연결 테스트와 리포트 요청에 저장된 사용자 인증 헤더가 적용됨(값은 로그에 남기지 않음)" || bad "추가 헤더가 연결 테스트·리포트에 적용되지 않음"
+if docker logs swinv-e2e-llm 2>&1 | grep -Eq "e2e-header-secret|sk-e2e-secret"; then bad "가짜 LLM 로그에 인증값 노출"; else pass "가짜 LLM 로그에 인증값 없음"; fi
 
 # 비특권 확인: 에이전트 실행 계정과 설정 파일 권한
 docker exec swinv-e2e-rocky sh -c 'id -u swinventory; stat -c "%a %U:%G %n" /etc/swinventory/token /etc/swinventory/agent.json /var/lib/swinventory/spool.db'

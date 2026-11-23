@@ -21,6 +21,14 @@ def test_encrypt_is_idempotent_and_plaintext_passes_through_decrypt():
     assert box.decrypt("not-encrypted") == "not-encrypted"
 
 
+def test_encrypt_literal_always_encrypts_an_enc_prefix_value():
+    box = SecretBox(Fernet.generate_key())
+    plaintext = "enc:v1:user-input-is-not-ciphertext"
+    token = box.encrypt_literal(plaintext)
+    assert token.startswith("enc:v1:") and token != plaintext and plaintext not in token
+    assert box.decrypt(token) == plaintext
+
+
 def test_wrong_key_and_tampering_fail_closed():
     token = SecretBox(Fernet.generate_key()).encrypt("x")
     with pytest.raises(SecretError):
