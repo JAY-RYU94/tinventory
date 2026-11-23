@@ -345,7 +345,7 @@ kev_entries = Table("kev_entries", metadata,
 vulnerability_feed_status = Table("vulnerability_feed_status", metadata,
     Column("source", String(16), primary_key=True), Column("state", String(16), nullable=False),
     Column("last_success_at", _TS, nullable=True), Column("last_attempt_at", _TS, nullable=True),
-    Column("last_error", String(500), nullable=False, default=""), Column("data_version", String(64), nullable=False, default=""),
+    Column("last_error", String(500), nullable=False, default=""), Column("data_version", Text, nullable=False, default=""),
     Column("records", Integer, nullable=False, default=0),
 )
 vulnerability_product_matches = Table("vulnerability_product_matches", metadata,

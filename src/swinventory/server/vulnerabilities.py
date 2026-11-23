@@ -16,6 +16,15 @@ KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulner
 NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 _CVE = re.compile(r"CVE-[0-9]{4}-[0-9]{4,}")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_SAFE_FEED_ERRORS = {
+    "timeout", "network_error", "invalid_feed",
+    "외부 피드가 리다이렉트했습니다.",
+    "외부 피드 응답이 20MB 한도를 넘었습니다.",
+    "외부 피드 JSON 형식이 올바르지 않습니다.",
+    "KEV catalog metadata/count mismatch", "KEV row is malformed",
+    "KEV row ID/date is malformed", "NVD page metadata is malformed",
+    "NVD CVE row is malformed", "NVD CVE ID is malformed",
+}
 
 
 class JsonFetcher(Protocol):
@@ -53,6 +62,24 @@ def _date(value: Any) -> str | None:
         return normalize_ts(value)
     except ValueError:
         return None
+
+
+def _safe_feed_error(exc: Exception) -> str:
+    """공급자·DB 예외의 원문을 숨기고 미리 정한 진단만 상태에 남긴다."""
+    message = exc.args[0] if exc.args and isinstance(exc.args[0], str) else ""
+    if type(exc) is RuntimeError and (message in _SAFE_FEED_ERRORS or re.fullmatch(r"HTTP [1-5][0-9]{2}", message)):
+        return message
+    if type(exc) is ValueError and message in _SAFE_FEED_ERRORS:
+        return message
+    return "sync_failed"
+
+
+def _record_failed(repo: InventoryRepository, source: str, attempted: str, error: str) -> None:
+    """실패 상태 쓰기도 안전한 예외로 감싸 SQL/바인드 값이 로그로 새지 않게 한다."""
+    try:
+        repo.record_vulnerability_feed(source, "failed", attempted, None, error, "", 0)
+    except Exception:
+        raise RuntimeError("feed_status_write_failed") from None
 
 
 def _retry(fetcher: JsonFetcher, url: str, *, params=None, headers=None) -> dict[str, Any]:
@@ -113,8 +140,8 @@ class VulnerabilityFeedService:
             self.repo.record_vulnerability_feed("cisa_kev", "ok", attempted, attempted, "", version, len(rows))
             return {"source": "cisa_kev", "state": "ok", "records": len(rows), "data_version": version}
         except Exception as exc:  # noqa: BLE001 — 기존 성공 데이터를 보존하고 공개 가능한 분류만 남긴다
-            error = str(exc)[:500] or type(exc).__name__
-            self.repo.record_vulnerability_feed("cisa_kev", "failed", attempted, None, error, "", 0)
+            error = _safe_feed_error(exc)
+            _record_failed(self.repo, "cisa_kev", attempted, error)
             return {"source": "cisa_kev", "state": "failed", "error": error}
 
     def sync_nvd_page(self) -> dict[str, Any]:
@@ -123,9 +150,16 @@ class VulnerabilityFeedService:
         previous = statuses.get("nvd") or {}
         try:
             cursor_data = {}
-            if previous.get("state") == "partial" and previous.get("data_version"):
+            if previous.get("data_version"):
                 try:
-                    cursor_data = json.loads(previous["data_version"])
+                    candidate = json.loads(previous["data_version"])
+                    if (isinstance(candidate, dict)
+                            and candidate.get("scope") == "modified_window_120d"
+                            and type(candidate.get("start_index")) is int and candidate["start_index"] >= 0
+                            and type(candidate.get("synced")) is int and candidate["synced"] >= 0
+                            and isinstance(candidate.get("window_start"), str)
+                            and isinstance(candidate.get("window_end"), str)):
+                        cursor_data = candidate
                 except (ValueError, TypeError):
                     cursor_data = {}
             if not cursor_data:
@@ -161,8 +195,8 @@ class VulnerabilityFeedService:
             return {"source": "nvd", "state": "ok", "records": synced, "total": total,
                     "scope": cursor_data["scope"]}
         except Exception as exc:  # noqa: BLE001 — 실패한 source 의 기존 CVE 행은 삭제하지 않는다
-            error = str(exc)[:500] or type(exc).__name__
-            self.repo.record_vulnerability_feed("nvd", "failed", attempted, None, error, "", 0)
+            error = _safe_feed_error(exc)
+            _record_failed(self.repo, "nvd", attempted, error)
             return {"source": "nvd", "state": "failed", "error": error}
 
     def sync(self) -> dict[str, Any]:

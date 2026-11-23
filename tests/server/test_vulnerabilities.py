@@ -1,6 +1,8 @@
 """CISA/NVD 피드 검증, 신선도 보존과 설치 근거 기반 CVE 조회 계약."""
+import json
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import inspect, text
 
 from swinventory.common.models import PackageRecord
 from swinventory.server.app import ApiSettings, create_app
@@ -107,10 +109,12 @@ def test_kev_nvd_sync_retains_official_metadata_and_exact_install_evidence(repo,
 
     # NVD 장애 때 마지막 성공 기준 시각·메타데이터를 지우지 않는다.
     before = {r["source"]: r for r in repo.vulnerability_feed_status()}["nvd"]["last_success_at"]
+    before_row = {r["source"]: r for r in repo.vulnerability_feed_status()}["nvd"]
     failed = VulnerabilityFeedService(repo, clock, FakeFetcher(fail_nvd=True)).sync_nvd_page()
     assert failed["state"] == "failed"
     after = {r["source"]: r for r in repo.vulnerability_feed_status()}["nvd"]
     assert after["state"] == "failed" and after["last_success_at"] == before
+    assert after["data_version"] == before_row["data_version"] and after["records"] == before_row["records"]
     assert client.get("/v1/vulnerabilities/CVE-2026-4242", headers=RD).status_code == 200
 
 
@@ -128,3 +132,93 @@ def test_nvd_pages_are_resumable_and_failure_does_not_claim_full_coverage(repo, 
     assert len(fetcher.calls) == 2
     assert fetcher.calls[1][1]["startIndex"] == "200"
     assert repo.vulnerability_detail("CVE-2026-9000") is not None
+
+
+def test_nvd_cursor_survives_failure_then_resumes_and_completes(repo, clock):
+    values = [_nvd(f"CVE-2026-{number:04d}") for number in range(200)]
+    values.append(_nvd("CVE-2026-9000"))
+    feed = FakeFetcher(cves=values, total=201)
+    service = VulnerabilityFeedService(repo, clock, feed)
+
+    partial = service.sync_nvd_page()
+    assert partial["state"] == "partial"
+    saved = {row["source"]: row for row in repo.vulnerability_feed_status()}["nvd"]
+    assert len(saved["data_version"]) > 64
+
+    feed.fail_nvd = True
+    failed = service.sync_nvd_page()
+    assert failed["state"] == "failed"
+    after_failure = {row["source"]: row for row in repo.vulnerability_feed_status()}["nvd"]
+    assert after_failure["data_version"] == saved["data_version"]
+    assert after_failure["records"] == 200
+
+    feed.fail_nvd = False
+    completed = service.sync_nvd_page()
+    assert completed["state"] == "ok" and completed["records"] == 201
+    assert feed.calls[-1][1]["startIndex"] == "200"
+
+
+def test_existing_varchar64_feed_status_is_migrated_without_losing_rows(repo):
+    engine = repo._engine
+    old_version = json.dumps({"scope": "modified_window_120d", "window_start": "2026-01-01T00:00:00Z",
+                              "window_end": "2026-01-02T00:00:00Z", "start_index": 200, "synced": 200,
+                              "total_results": 201}, sort_keys=True)
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE vulnerability_feed_status"))
+        conn.execute(text("""CREATE TABLE vulnerability_feed_status (
+            source VARCHAR(16) PRIMARY KEY NOT NULL,
+            state VARCHAR(16) NOT NULL,
+            last_success_at VARCHAR(32),
+            last_attempt_at VARCHAR(32),
+            last_error VARCHAR(500) NOT NULL DEFAULT '',
+            data_version VARCHAR(64) NOT NULL DEFAULT '',
+            records INTEGER NOT NULL DEFAULT 0
+        )"""))
+        conn.execute(text("""INSERT INTO vulnerability_feed_status
+            (source,state,last_success_at,last_attempt_at,last_error,data_version,records)
+            VALUES ('nvd','partial',NULL,'2026-01-02T00:00:00Z','','{"scope":"legacy"}',200)"""))
+
+    # 새 프로세스가 시작될 때 constructor migration을 반복 실행해도 안전해야 한다.
+    from swinventory.server.repo.sql import SqlInventoryRepository
+    SqlInventoryRepository(engine)
+    SqlInventoryRepository(engine)
+
+    columns = {column["name"]: column for column in inspect(engine).get_columns("vulnerability_feed_status")}
+    if engine.dialect.name == "postgresql":
+        assert columns["data_version"]["type"].__class__.__name__.lower() == "text"
+    else:
+        # SQLite 는 VARCHAR(n) 길이를 강제하지 않으므로 기존 테이블을 재작성하지 않는다.
+        assert columns["data_version"]["type"].length == 64
+    migrated = {row["source"]: row for row in repo.vulnerability_feed_status()}["nvd"]
+    assert migrated["data_version"] == '{"scope":"legacy"}'
+    assert migrated["last_attempt_at"] == "2026-01-02T00:00:00Z" and migrated["records"] == 200
+    repo.record_vulnerability_feed("nvd", "partial", "2026-01-03T00:00:00Z", None, "",
+                                   old_version, 200)
+    row = {value["source"]: value for value in repo.vulnerability_feed_status()}["nvd"]
+    assert row["state"] == "partial"
+    assert row["last_attempt_at"] == "2026-01-03T00:00:00Z"
+    assert row["data_version"] == old_version
+    assert row["records"] == 200
+
+
+def test_sync_does_not_expose_raw_database_exception(repo, clock, monkeypatch):
+    def fail_upsert(*_args, **_kwargs):
+        raise RuntimeError("INSERT INTO vulnerability_cves VALUES ('secret-db-value')")
+
+    monkeypatch.setattr(repo, "upsert_nvd_vulnerabilities", fail_upsert)
+    result = VulnerabilityFeedService(repo, clock, FakeFetcher()).sync_nvd_page()
+    assert result["state"] == "failed"
+    assert result["error"] == "sync_failed"
+    status = {row["source"]: row for row in repo.vulnerability_feed_status()}["nvd"]
+    assert status["last_error"] == "sync_failed"
+    assert "secret-db-value" not in str(result) + str(status)
+
+
+def test_failure_to_record_feed_status_does_not_echo_sql_exception(repo, clock, monkeypatch):
+    def fail_record(*_args, **_kwargs):
+        raise RuntimeError("UPDATE vulnerability_feed_status SET secret='private'")
+
+    monkeypatch.setattr(repo, "record_vulnerability_feed", fail_record)
+    with pytest.raises(RuntimeError, match="feed_status_write_failed") as exc:
+        VulnerabilityFeedService(repo, clock, FakeFetcher()).sync_nvd_page()
+    assert "private" not in str(exc.value)

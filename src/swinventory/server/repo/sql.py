@@ -9,7 +9,7 @@ from contextvars import ContextVar
 from typing import Any, Iterable, Iterator
 
 from sqlalchemy import (
-    Connection, Engine, and_, case, cast, create_engine, delete, distinct, event, exists, func, insert, inspect, or_, select, text, update,
+    Connection, Engine, String, Text, and_, case, cast, create_engine, delete, distinct, event, exists, func, insert, inspect, or_, select, text, update,
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import StaticPool
@@ -56,6 +56,7 @@ class SqlInventoryRepository(InventoryRepository):
                 columns = {column["name"] for column in inspect(c).get_columns("assets")}
                 if "revision" not in columns:
                     c.execute(text("ALTER TABLE assets ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"))
+            self._migrate_vulnerability_feed_data_version(c)
         # 첫 행 생성도 여러 프로세스에서 멱등이다. 아래 UPDATE 가 DB 간 공통 쓰기 잠금이다.
         if engine.dialect.name == "postgresql":
             from sqlalchemy.dialects.postgresql import insert as guard_insert
@@ -63,6 +64,26 @@ class SqlInventoryRepository(InventoryRepository):
             from sqlalchemy.dialects.sqlite import insert as guard_insert
         with engine.begin() as c:
             c.execute(guard_insert(S.auth_guard).values(id=1, revision=0).on_conflict_do_nothing())
+
+    @staticmethod
+    def _migrate_vulnerability_feed_data_version(conn: Connection) -> None:
+        """기존 PostgreSQL 의 VARCHAR(64) 를 무손실 TEXT 로 넓힌다.
+
+        SQLite 는 VARCHAR(n) 길이를 제한하지 않아 기존 파일도 긴 커서를 저장할 수
+        있으므로 재작성하지 않는다. PostgreSQL 에서만 실제 bounded 컬럼일 때 ALTER 한다.
+        """
+        if conn.dialect.name != "postgresql":
+            return
+        inspector = inspect(conn)
+        if "vulnerability_feed_status" not in inspector.get_table_names():
+            return
+        columns = {column["name"]: column for column in inspector.get_columns("vulnerability_feed_status")}
+        column = columns.get("data_version")
+        if column is None:
+            return
+        column_type = column["type"]
+        if isinstance(column_type, String) and not isinstance(column_type, Text) and column_type.length is not None:
+            conn.execute(text("ALTER TABLE vulnerability_feed_status ALTER COLUMN data_version TYPE TEXT"))
 
     @classmethod
     def from_url(cls, url: str) -> "SqlInventoryRepository":
