@@ -1288,7 +1288,7 @@ def test_mismatch_filter_and_banner_link(site, make_page):
     expect(page.get_by_label("상태 필터")).to_have_value("mismatch")
     rows = page.locator("tbody tr")
     expect(rows).to_have_count(mismatched)
-    assert all("불일치" in t for t in rows.locator("td:nth-child(8)").all_inner_texts()), "불일치 필터인데 일치하는 행이 섞였다"
+    assert all("불일치" in t for t in rows.locator("td:nth-child(9)").all_inner_texts()), "불일치 필터인데 일치하는 행이 섞였다"
     page.get_by_label("상태 필터").select_option("")
     expect(page.locator("tbody tr")).to_have_count(total)
     page.get_by_label("상태 필터").select_option("mismatch")
@@ -1357,6 +1357,179 @@ def test_register_from_host_requires_an_explicit_kind_validates_inline_and_retur
             if row["asset"] and row["asset"]["asset_no"] == "UX-TEST-0001":
                 call(site.base, f"/v1/assets/{row['asset']['id']}", method="DELETE")
     assert page.problems == []
+
+
+def test_asset_owner_fields_flow_through_host_list_detail_search_and_delete(site, make_page, tmp_path):
+    page = make_page(width=1440, height=1000)
+    host = site.unknown_kind_host
+    asset_no = "UX-OWNERS-0001"
+    primary = "Owner-" + "A" * 122  # 128자 경계값: 목록 열이 이 값 때문에 커지지 않아야 한다
+    secondary = "부 담당자 / 식별정보 02"
+    asset_id = None
+    open_route(page, site.base, f"#/hosts/{host}")
+    page.get_by_role("button", name="자산으로 등록").click()
+    expect(page.get_by_label("담당자(정)")).to_be_visible()
+    expect(page.get_by_label("담당자(정)")).to_have_attribute("maxlength", "128")
+    expect(page.get_by_label("담당자(부)")).to_have_attribute("maxlength", "128")
+    page.get_by_label("자산번호 *").fill(asset_no)
+    page.get_by_label("구분 *").select_option("physical")
+    page.get_by_label("담당자(정)").fill(primary)
+    page.get_by_label("담당자(부)").fill(secondary)
+    try:
+        page.get_by_role("button", name="저장", exact=True).click()
+        expect(page).to_have_url(re.compile(re.escape(f"#/hosts/{host}") + "$"))
+        host_panel = page.locator(".panel").filter(has=page.get_by_text("자산번호", exact=True)).first
+        expect(host_panel).to_contain_text(primary)
+        expect(host_panel).to_contain_text(secondary)
+        host_asset = call(site.base, f"/v1/hosts/{host}")["asset"]
+        assert host_asset["primary_owner"] == primary and host_asset["secondary_owner"] == secondary
+        asset_id = host_asset["asset_id"]
+
+        open_route(page, site.base, "#/assets")
+        search = page.get_by_label("자산 검색")
+        expect(search).to_have_attribute("placeholder", re.compile("담당자"))
+        search.fill(primary)
+        rows = page.locator("tbody tr")
+        expect(rows).to_have_count(1)
+        owner_cell = rows.locator("td.asset-owners")
+        expect(owner_cell.locator(".asset-owner-line")).to_have_count(2)
+        assert owner_cell.locator(".asset-owner-label").all_inner_texts() == ["정", "부"]
+        expect(owner_cell).to_contain_text(primary)
+        expect(owner_cell).to_contain_text(secondary)
+        width = owner_cell.evaluate("el => el.getBoundingClientRect().width")
+        assert width <= 220, f"128자 담당자 때문에 열이 넓어졌다: {width}px"
+
+        screenshot_dir = Path(os.environ.get("SWINV_UI_SCREENSHOT_DIR", str(tmp_path)))
+        screenshot_dir.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(screenshot_dir / "asset-owners-desktop.png"), full_page=True)
+
+        mobile = make_page(width=390, height=844)
+        open_route(mobile, site.base, f"#/assets?q={primary}")
+        metrics = mobile.evaluate("() => ({ viewport: innerWidth, document: document.documentElement.scrollWidth, cell: document.querySelector('td.asset-owners')?.getBoundingClientRect().width })")
+        assert metrics["document"] <= metrics["viewport"], metrics
+        assert metrics["cell"] <= 220, metrics
+        assert mobile.problems == []
+
+        rows.get_by_role("link", name="보기").click()
+        expect(page.get_by_role("heading", name=f"자산 {asset_no}")).to_be_visible()
+        overview = page.locator("#app dl.kv").first
+        values = overview.locator("dd").all_inner_texts()
+        labels = overview.locator("dt").all_inner_texts()
+        assert values[labels.index("담당자(정)")] == primary
+        assert values[labels.index("담당자(부)")] == secondary
+        open_route(page, site.base, f"#/hosts/{host}")
+        host_asset_panel = page.locator(".panel").filter(has=page.get_by_text("자산번호", exact=True)).first
+        expect(host_asset_panel).to_contain_text(primary)
+        expect(host_asset_panel).to_contain_text(secondary)
+
+        open_route(page, site.base, f"#/assets/{asset_id}/edit")
+        page.get_by_label("담당자(정)").fill("가상 인물 · 김하늘")
+        page.get_by_label("담당자(부)").fill("가상 식별정보 · 운영팀-부-02")
+        page.get_by_role("button", name="저장", exact=True).click()
+        expect(page.get_by_role("status").filter(has_text="자산 정보를 저장했습니다.")).to_be_visible()
+        saved = call(site.base, f"/v1/assets/{asset_id}")["asset"]
+        assert saved["primary_owner"] == "가상 인물 · 김하늘"
+        assert saved["secondary_owner"] == "가상 식별정보 · 운영팀-부-02"
+        open_route(page, site.base, f"#/assets/{asset_id}")
+        page.screenshot(path=str(screenshot_dir / "asset-owners-detail-desktop.png"), full_page=True)
+
+        open_route(page, site.base, f"#/assets/{asset_id}/edit")
+        page.get_by_label("담당자(정)").fill("")
+        page.get_by_label("담당자(부)").fill("")
+        page.get_by_role("button", name="저장", exact=True).click()
+        expect(page.get_by_role("status").filter(has_text="자산 정보를 저장했습니다.")).to_be_visible()
+        blank = call(site.base, f"/v1/assets/{asset_id}")["asset"]
+        assert blank["primary_owner"] == blank["secondary_owner"] == ""
+        open_route(page, site.base, f"#/assets/{asset_id}")
+        overview = page.locator("#app dl.kv").first
+        values = overview.locator("dd").all_inner_texts()
+        labels = overview.locator("dt").all_inner_texts()
+        assert values[labels.index("담당자(정)")] == "미지정"
+        assert values[labels.index("담당자(부)")] == "미지정"
+
+        open_route(page, site.base, f"#/assets/{asset_id}/edit")
+        dialogs = []
+        page.once("dialog", lambda dialog: (dialogs.append(dialog.message), dialog.accept()))
+        page.get_by_role("button", name="삭제").click()
+        expect(page).to_have_url(re.compile(r"#/assets$"))
+        assert dialogs and "삭제" in dialogs[0]
+        assert all(row["asset"]["id"] != asset_id for row in call(site.base, "/v1/assets") if row["asset"])
+        asset_id = None
+        assert page.problems == []
+    finally:
+        if asset_id is None:
+            asset_id = next((row["asset"]["id"] for row in call(site.base, "/v1/assets")
+                             if row["asset"] and row["asset"]["asset_no"] == asset_no), None)
+        if asset_id is not None:
+            call(site.base, f"/v1/assets/{asset_id}", method="DELETE")
+
+
+def test_asset_owner_draft_and_revision_conflicts_keep_or_restore_the_selected_values(site, make_page):
+    page = make_page()
+    created = call(site.base, "/v1/assets", method="POST", body={
+        "asset_no": "UX-OWNER-CONFLICT-0001", "kind": "physical", "primary_owner": "기준 정 담당자", "secondary_owner": "기준 부 담당자",
+    })
+    asset_id = created["id"]
+
+    def put_latest(primary: str, secondary: str) -> None:
+        current = call(site.base, f"/v1/assets/{asset_id}")["asset"]
+        payload = {key: current.get(key) for key in (
+            "asset_no", "kind", "serial", "hostname", "domain", "ip", "parent_asset_id", "host_id", "note",
+            "primary_owner", "secondary_owner",
+        )}
+        payload.update(primary_owner=primary, secondary_owner=secondary, expected_revision=current["revision"])
+        call(site.base, f"/v1/assets/{asset_id}", method="PUT", body=payload)
+
+    try:
+        open_route(page, site.base, f"#/assets/{asset_id}/edit")
+        expect(page.get_by_label("담당자(정)")).to_have_value("기준 정 담당자")
+        page.get_by_label("담당자(정)").fill("저장 전 초안")
+        dialogs = []
+        def dismiss_dialog(dialog):
+            dialogs.append(dialog.message)
+            dialog.dismiss()
+        page.on("dialog", dismiss_dialog)
+        with page.expect_event("dialog") as prompt:
+            page.get_by_role("link", name="← 자산 목록").click()
+        assert prompt.value.message == "저장하지 않은 자산 변경 내용이 있습니다. 이 화면을 떠날까요?"
+        assert dialogs == [prompt.value.message]
+        expect(page).to_have_url(re.compile(rf"#/assets/{asset_id}/edit$"))
+        expect(page.get_by_label("담당자(정)")).to_have_value("저장 전 초안")
+        page.remove_listener("dialog", dismiss_dialog)
+
+        page.get_by_label("담당자(정)").fill("내 정 담당자")
+        page.get_by_label("담당자(부)").fill("내 부 담당자")
+        put_latest("최신 정 담당자", "최신 부 담당자")
+        page.get_by_role("button", name="저장", exact=True).click()
+        dialog = page.locator("dialog.editor-dialog")
+        expect(dialog).to_be_visible()
+        expect(dialog.get_by_label("담당자(정) 충돌 해결").locator("xpath=ancestor::tr")).to_contain_text("최신 정 담당자")
+        expect(dialog.get_by_label("담당자(부) 충돌 해결").locator("xpath=ancestor::tr")).to_contain_text("내 부 담당자")
+        dialog.get_by_label("담당자(정) 충돌 해결").select_option("mine")
+        dialog.get_by_label("담당자(부) 충돌 해결").select_option("latest")
+        dialog.get_by_role("button", name="선택한 값으로 저장").click()
+        expect(page.get_by_role("status").filter(has_text="자산 정보를 저장했습니다.")).to_be_visible()
+        merged = call(site.base, f"/v1/assets/{asset_id}")["asset"]
+        assert merged["primary_owner"] == "내 정 담당자"
+        assert merged["secondary_owner"] == "최신 부 담당자"
+
+        open_route(page, site.base, f"#/assets/{asset_id}/edit")
+        page.get_by_label("담당자(정)").fill("버릴 정 담당자")
+        put_latest("불러올 최신 정 담당자", "불러올 최신 부 담당자")
+        page.get_by_role("button", name="저장", exact=True).click()
+        dialog = page.locator("dialog.editor-dialog")
+        expect(dialog).to_be_visible()
+        dialog.get_by_role("button", name="최신값 불러오기").click()
+        expect(dialog).to_have_count(0)
+        expect(page.get_by_label("담당자(정)")).to_have_value("불러올 최신 정 담당자")
+        expect(page.get_by_label("담당자(부)")).to_have_value("불러올 최신 부 담당자")
+        final = call(site.base, f"/v1/assets/{asset_id}")["asset"]
+        assert final["primary_owner"] == "불러올 최신 정 담당자"
+        assert final["secondary_owner"] == "불러올 최신 부 담당자"
+        expected_conflicts = [problem for problem in page.problems if "409 (Conflict)" in problem]
+        assert len(expected_conflicts) == 2 and [problem for problem in page.problems if "409 (Conflict)" not in problem] == [], page.problems
+    finally:
+        call(site.base, f"/v1/assets/{asset_id}", method="DELETE")
 
 
 def test_asset_edit_returns_to_the_list_it_came_from(site, make_page):

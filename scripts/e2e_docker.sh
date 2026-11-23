@@ -95,6 +95,21 @@ ev0=$(get /v1/events | jq_ "len(d)")
 [ "$ev0" = "0" ] && pass "첫 스냅샷은 기준선 — 이벤트 0건" || bad "기준선인데 이벤트 $ev0 건"
 get /v1/hosts | jq_ "'; '.join(f\"{h['hostname']}: {h['os_name']} / kernel {h['running']} / {h['status']}\" for h in d)"
 hid() { get /v1/hosts | $PY -c "import sys,json; print([h for h in json.load(sys.stdin) if h['hostname']=='$1'][0]['host_id'])"; }
+# 자산 담당자는 계정과 별개인 관리자 메타데이터다. 연결 호스트 상세와 CSV 에 나오고 재수집에도 덮이지 않아야 한다.
+asset_host_id=$(hid e2e-ubuntu)
+asset_response=$(curl -fsS -H 'Authorization: Bearer e2e-admin' -H 'Content-Type: application/json' \
+  -d "{\"asset_no\":\"E2E-UBUNTU\",\"kind\":\"physical\",\"serial\":\"E2E-SN-ubuntu\",\"host_id\":\"$asset_host_id\",\"primary_owner\":\"e2e-primary-owner\",\"secondary_owner\":\"e2e-secondary-owner\"}" \
+  "$API/v1/assets")
+asset_id=$(echo "$asset_response" | jq_ "d['id']")
+[ "$(echo "$asset_response" | jq_ "(d['primary_owner'], d['secondary_owner'])")" = "('e2e-primary-owner', 'e2e-secondary-owner')" ] \
+  && pass "자산의 정·부 담당자를 계정 연결 없이 저장" || bad "자산 담당자 저장"
+[ "$(get "/v1/assets/$asset_id" | jq_ "(d['asset']['primary_owner'], d['asset']['secondary_owner'])")" = "('e2e-primary-owner', 'e2e-secondary-owner')" ] \
+  && pass "자산 상세에 정·부 담당자 반환" || bad "자산 상세 담당자"
+[ "$(get "/v1/hosts/$asset_host_id" | jq_ "(d['asset']['primary_owner'], d['asset']['secondary_owner'])")" = "('e2e-primary-owner', 'e2e-secondary-owner')" ] \
+  && pass "연결 호스트 상세에 정·부 담당자 표시" || bad "호스트 상세 담당자"
+asset_csv=$(curl -fsS -H 'Authorization: Bearer e2e-read' "$API/v1/assets?format=csv")
+echo "$asset_csv" | $PY -c 'import csv,sys; rows=list(csv.DictReader(sys.stdin)); assert rows and {"primary_owner","secondary_owner"} <= set(rows[0]); assert any(r["primary_owner"]=="e2e-primary-owner" and r["secondary_owner"]=="e2e-secondary-owner" for r in rows)' \
+  && pass "자산 CSV 에 정·부 담당자 열과 값 포함" || bad "자산 담당자 CSV"
 for n in ubuntu debian rocky; do
   echo "  [$n] 패키지 수 / 수집 오류: $(get /v1/hosts/$(hid e2e-$n) | jq_ "(len(d['packages']), d['host']['last_errors'])")"
 done
@@ -159,6 +174,8 @@ for n in ubuntu debian rocky; do
   docker exec swinv-e2e-$n runuser -u swinventory -- python3 /usr/local/lib/swinventory/swinventory-agent.pyz collect --config /etc/swinventory/agent.json >/dev/null 2>&1 \
     && pass "[$n] 재수집" || bad "[$n] 재수집 실패"
 done
+[ "$(get "/v1/hosts/$asset_host_id" | jq_ "(d['asset']['primary_owner'], d['asset']['secondary_owner'])")" = "('e2e-primary-owner', 'e2e-secondary-owner')" ] \
+  && pass "에이전트 재수집은 관리자 담당자 메타데이터를 변경하지 않음" || bad "재수집 뒤 담당자 변경"
 get "/v1/events?limit=100" | jq_ "'\n'.join(f\"  {e['hostname']}: {e['event_type']} {e['subject_key']} {e['old_value']}->{e['new_value']}\" for e in d)"
 inst=$(get "/v1/events?type=package_installed" | jq_ "sorted(e['hostname']+':'+e['subject_key'] for e in d)")
 missing=$(echo "$inst" | $PY -c "import sys,ast; want={'e2e-debian:tree','e2e-rocky:tree','e2e-ubuntu:htop'}; print(sorted(want-set(ast.literal_eval(sys.stdin.read()))))")

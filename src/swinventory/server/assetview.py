@@ -137,6 +137,8 @@ class AssetBook:
             "virt": hw.virt if hw else "",
             "domain": (asset.get("domain") if asset else "") or (hw.domain if hw else ""),
             "serial": (asset.get("serial") if asset else "") or (hw.serial if hw else ""),
+            "primary_owner": (asset.get("primary_owner") or "") if asset else "",
+            "secondary_owner": (asset.get("secondary_owner") or "") if asset else "",
             "parent_asset_id": pid, "parent_asset_no": pno, "parent_hostname": plabel,
             "match_by": self._link[aid][1] if asset else None,
             "flags": self._flags(asset, host) if asset and host else [],

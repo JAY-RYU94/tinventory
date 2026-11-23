@@ -146,6 +146,7 @@ PYTHONPATH=src python3 -m swinventory.server.contract --write   # 계약 스키�
 
 ## 자산 관리·장비 정보 규칙
 - **연결은 저장하지 않고 읽을 때 계산한다**(`server/assetview.py` 순수 로직). 우선순위 명시>시리얼>호스트명>IP, 단계마다 '자산·호스트 양쪽에서 유일하게 맞는 쌍만' 연결한다 — **모호하면 연결하지 않는다**. 명시 연결 `assets.host_id` 는 FK 가 없다(호스트가 삭제돼도 대장은 남고 다시 수집되면 이어진다).
+- **정/부 담당자는 자산 메타데이터**(`primary_owner`, `secondary_owner`)로 각 128자 이하 문자열을 관리자 입력으로 저장한다. 계정 연결·수집 경로를 만들지 않으며 에이전트 재수집이 덮지 않는다. 자산 PUT 은 전체 교체라 필드 생략은 빈 값이고, 목록 검색·CSV 와 연결 호스트 상세 asset view 를 함께 갱신한다. 기존 SQLite/PostgreSQL `assets` 테이블에는 값 보존·반복 안전한 migration 을 적용한다.
 - **근거가 없으면 `unknown`**(물리로 단정 금지). 시리얼 자리표시자(`To Be Filled By O.E.M.`, 0 만, `FFFFFFFF` …)는 비교·표시에서 제외. 규칙은 `common/hardware.py`(Python)와 `Collectors/Hardware.cs`(C#)에 **이중 구현**이며 `contracts/hardware-vectors.json` 공유 벡터로 맞춘다(한쪽만 바꾸면 양쪽 테스트가 깨진다 — 벡터가 선행 점 FQDN 결함을 실제로 잡았다).
 - **장비 정보는 부가 정보다**: 수신 모델이 값을 고치거나 비우고 받는다(길이 초과·알 수 없는 kind → `unknown`). 값 하나가 호스트의 커널·소프트웨어 수집을 막으면 안 된다. 실패한 `hardware` 수집기는 이전 값을 건드리지 않는다.
 - **시리얼(Linux)**: 에이전트는 root 가 아니라 `product_serial` 을 못 읽는다 → `install.sh`(root)가 `/etc/swinventory/dmi_serial` 에 저장, 에이전트는 직접 읽기 → 저장 파일 순으로 본다. e2e 는 `--dmi-serial-file` 로 가짜 시리얼 파일을 넘겨 이 경로를 끝까지 검증한다(Docker Desktop VM 에는 읽을 수 있는 DMI 시리얼이 없다).

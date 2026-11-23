@@ -145,6 +145,11 @@ td.nowrap { white-space: nowrap; }
 /* 열이 많은 표(호스트 등)에서 auto 레이아웃은 칸을 min-content 까지 줄인다 — OS 이름("Rocky Linux 9.4 (Blue Onyx)")이 66px 칸에서 3~5줄로 쌓여 행이 80~120px 가 됐다.
  * 줄바꿈은 허용하되 두 줄 안에 들어가는 바닥 너비를 준다(em 이라 글꼴 크기에 비례). 자산번호 칸은 '링크 + 배지 하나'가 첫 줄, 나머지 배지가 둘째 줄이다. */
 td.asset, td.os { min-width: 11em; }
+td.asset-owners { width: 12em; min-width: 12em; max-width: 12em; }
+.asset-owner-cell { display: grid; gap: 2px; width: 12em; max-width: 12em; min-width: 0; }
+.asset-owner-line { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 5px; align-items: baseline; min-width: 0; line-height: 1.35; }
+.asset-owner-label { color: var(--muted); font-size: 12px; }
+.asset-owner-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 필터 칩(적용 중인 필터를 보여 주고 하나씩 끈다) */
 .chip { display: inline-flex; align-items: center; gap: 2px; padding: 2px 4px 2px 10px; border: 1px solid var(--accent); border-radius: 14px; background: var(--panel); color: var(--text); font-size: 13px; }

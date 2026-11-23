@@ -33,9 +33,11 @@ class AssetIn(BaseModel):
     parent_asset_id: int | None = Field(default=None, description="VM 이 올라간 물리 장비의 자산 id")
     host_id: str | None = Field(default=None, max_length=128, description="수집 호스트와 자동 연결이 안 될 때 관리자가 지정하는 명시 연결")
     note: str = Field(default="", max_length=500)
+    primary_owner: str = Field(default="", max_length=128, description="정 담당자(계정 연결 없이 입력)")
+    secondary_owner: str = Field(default="", max_length=128, description="부 담당자(계정 연결 없이 입력)")
     expected_revision: int | None = Field(default=None, ge=1)
 
-    @field_validator("asset_no", "serial", "hostname", "domain", "ip", "host_id", "note", mode="before")
+    @field_validator("asset_no", "serial", "hostname", "domain", "ip", "host_id", "note", "primary_owner", "secondary_owner", mode="before")
     @classmethod
     def _clean(cls, v: Any) -> Any:  # NUL·제어문자는 PostgreSQL 에서 500 이 되므로 거부하지 않고 제거한다
         return clean_text(strip_controls(v)) if isinstance(v, str) else v
@@ -82,12 +84,14 @@ _STATUS = Query(None, pattern="^(linked|uncollected|unregistered|registered|mism
                             "registered=대장에 등록된 자산(연결·미수집 포함), mismatch=대장과 수집값이 어긋난 행(flags 가 있는 모든 상태)")
 _KIND = Query(None, pattern="^(physical|virtual|container|unknown)$")
 _CSV_COLUMNS = ["asset_no", "kind", "status", "hostname", "domain", "ip", "serial", "virt", "parent_asset_no", "host_id",
-                "match_by", "flags", "note"]
+                "match_by", "flags", "note", "primary_owner", "secondary_owner"]
 
 
 def _flat(row: dict[str, Any]) -> dict[str, Any]:
     a = row["asset"] or {}
-    return {**row, "asset_no": a.get("asset_no"), "note": a.get("note", ""), "flags": ";".join(row["flags"])}
+    return {**row, "asset_no": a.get("asset_no"), "note": a.get("note", ""),
+            "primary_owner": a.get("primary_owner", ""), "secondary_owner": a.get("secondary_owner", ""),
+            "flags": ";".join(row["flags"])}
 
 
 def _status_matches(row: dict[str, Any], status: str | None) -> bool:
@@ -102,7 +106,7 @@ def _status_matches(row: dict[str, Any], status: str | None) -> bool:
 def _matches(row: dict[str, Any], needle: str) -> bool:
     a = row["asset"] or {}
     hay = [row["hostname"], row["domain"], row["serial"], row["ip"], *row["ips"], row["parent_asset_no"] or "",
-           *(str(a.get(k) or "") for k in ("asset_no", "serial", "hostname", "domain", "ip", "note"))]
+           *(str(a.get(k) or "") for k in ("asset_no", "serial", "hostname", "domain", "ip", "note", "primary_owner", "secondary_owner"))]
     return any(needle in h.lower() for h in hay)
 
 

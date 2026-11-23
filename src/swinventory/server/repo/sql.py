@@ -49,13 +49,10 @@ class SqlInventoryRepository(InventoryRepository):
         self._auth_thread_lock = threading.RLock()
         self._tx: ContextVar[Connection | None] = ContextVar(f"inventory_tx_{id(self)}", default=None)
         S.metadata.create_all(engine)
-        # create_all 은 기존 테이블의 새 컬럼을 추가하지 않는다. 관리 자산 수정 잠금은 이전
-        # SQLite/PostgreSQL 데이터베이스에도 기본 revision 1로 적용한다.
+        # create_all 은 기존 테이블의 새 컬럼을 추가하지 않는다. 관리 자산 잠금·담당자 열은
+        # 이전 SQLite/PostgreSQL DB 에 값 보존하며 반복 안전하게 추가한다.
         with engine.begin() as c:
-            if "assets" in inspect(c).get_table_names():
-                columns = {column["name"] for column in inspect(c).get_columns("assets")}
-                if "revision" not in columns:
-                    c.execute(text("ALTER TABLE assets ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"))
+            self._migrate_assets(c)
             self._migrate_vulnerability_feed_data_version(c)
         # 첫 행 생성도 여러 프로세스에서 멱등이다. 아래 UPDATE 가 DB 간 공통 쓰기 잠금이다.
         if engine.dialect.name == "postgresql":
@@ -64,6 +61,20 @@ class SqlInventoryRepository(InventoryRepository):
             from sqlalchemy.dialects.sqlite import insert as guard_insert
         with engine.begin() as c:
             c.execute(guard_insert(S.auth_guard).values(id=1, revision=0).on_conflict_do_nothing())
+
+    @staticmethod
+    def _migrate_assets(conn: Connection) -> None:
+        """기존 자산 행을 유지하며 누락된 revision·담당자 컬럼을 추가한다."""
+        inspector = inspect(conn)
+        if "assets" not in inspector.get_table_names():
+            return
+        columns = {column["name"] for column in inspector.get_columns("assets")}
+        if "revision" not in columns:
+            conn.execute(text("ALTER TABLE assets ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"))
+        if "primary_owner" not in columns:
+            conn.execute(text("ALTER TABLE assets ADD COLUMN primary_owner VARCHAR(128) NOT NULL DEFAULT ''"))
+        if "secondary_owner" not in columns:
+            conn.execute(text("ALTER TABLE assets ADD COLUMN secondary_owner VARCHAR(128) NOT NULL DEFAULT ''"))
 
     @staticmethod
     def _migrate_vulnerability_feed_data_version(conn: Connection) -> None:
@@ -652,10 +663,12 @@ class SqlInventoryRepository(InventoryRepository):
         return sorted(rows, key=lambda r: (r["proto"], r["port"], r["hostname"], _bind_key(r["bind"])))
 
     # --- 자산 대장 --------------------------------------------------------
-    _ASSET_FIELDS = ("asset_no", "kind", "serial", "hostname", "domain", "ip", "parent_asset_id", "host_id", "note")
+    _ASSET_FIELDS = ("asset_no", "kind", "serial", "hostname", "domain", "ip", "parent_asset_id", "host_id", "note",
+                     "primary_owner", "secondary_owner")
 
     def _asset_values(self, values: dict[str, Any]) -> dict[str, Any]:
-        out = {k: values[k] for k in self._ASSET_FIELDS}
+        # 구형 저장소 호출자도 담당자 없이 자산을 저장할 수 있다.
+        out = {k: values.get(k, "") if k in {"primary_owner", "secondary_owner"} else values[k] for k in self._ASSET_FIELDS}
         out["asset_no_key"] = values["asset_no"].casefold()
         return out
 

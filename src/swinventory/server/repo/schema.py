@@ -190,6 +190,8 @@ assets = Table(
     Column("parent_asset_id", Integer, ForeignKey("assets.id"), nullable=True),   # VM → 올라간 물리 장비
     Column("host_id", String(128), nullable=True, unique=True),
     Column("note", String(500), nullable=False, default=""),
+    Column("primary_owner", String(128), nullable=False, default="", server_default=""),
+    Column("secondary_owner", String(128), nullable=False, default="", server_default=""),
     Column("created_at", _TS, nullable=False),
     Column("updated_at", _TS, nullable=False),
     Column("revision", Integer, nullable=False, server_default="1"),

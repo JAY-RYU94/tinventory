@@ -374,7 +374,9 @@
   async function render() {
     if (assetDraftGuard && location.hash !== assetDraftGuard.hash) {
       if (assetDraftGuard.isDirty() && !confirm("저장하지 않은 자산 변경 내용이 있습니다. 이 화면을 떠날까요?")) {
-        location.hash = assetDraftGuard.hash;
+        // location.hash 로 되돌리면 두 번째 hashchange 가 폼을 다시 읽어 초안을 지운다.
+        // 현재 항목만 replaceState 로 복구해 입력 중인 DOM 과 초점을 그대로 둔다.
+        history.replaceState(history.state, "", assetDraftGuard.hash);
         return;
       }
       assetDraftGuard = null;
@@ -833,13 +835,24 @@
       eventsTable(d.events, false)), host.hostname);
   }
 
+  const assetOwnerValue = (value) => String(value || "").trim();
+  const assetOwnerDetails = (asset) => [
+    h("dt", null, "담당자(정)"), h("dd", null, assetOwnerValue(asset?.primary_owner) || h("span", { class: "muted" }, "미지정")),
+    h("dt", null, "담당자(부)"), h("dd", null, assetOwnerValue(asset?.secondary_owner) || h("span", { class: "muted" }, "미지정")),
+  ];
+  const assetOwnerCell = (asset) => h("div", { class: "asset-owner-cell" },
+    [["정", assetOwnerValue(asset?.primary_owner)], ["부", assetOwnerValue(asset?.secondary_owner)]].map(([label, value]) =>
+      h("div", { class: "asset-owner-line" }, h("span", { class: "asset-owner-label" }, label),
+        h("span", { class: value ? "asset-owner-value" : "asset-owner-value muted", title: value || "미지정" }, value || "미지정"))));
+
   function assetPanel(d) {
     const a = d.asset;
     if (!a.asset_id) {
       const register = gate(h("button", { class: "primary", type: "button", onclick: () => { location.hash = `#/assets/new?host=${enc(d.host.host_id)}&return=${enc(currentReturn())}`; } }, "자산으로 등록"));
       return h("div", { class: "panel" }, h("dl", { class: "kv" },
         h("dt", null, "자산번호"), h("dd", null, h("span", { class: "muted" }, "자산 대장에 없음")),
-        h("dt", null, "구분"), h("dd", null, [kindBadge(a), " ", h("span", { class: "muted" }, "에이전트가 감지한 값")])),
+        h("dt", null, "구분"), h("dd", null, [kindBadge(a), " ", h("span", { class: "muted" }, "에이전트가 감지한 값")]),
+        ...assetOwnerDetails(a)),
       h("div", { class: "toolbar" }, register));
     }
     return h("div", { class: "panel" }, h("dl", { class: "kv" },
@@ -847,6 +860,7 @@
       h("dt", null, "구분"), h("dd", null, kindBadge(a)),
       h("dt", null, "도메인"), h("dd", null, a.domain || "-"),
       h("dt", null, "시리얼"), h("dd", { class: "mono" }, a.serial || "-"),
+      ...assetOwnerDetails(a),
       h("dt", null, "상위 호스트"), h("dd", null, a.parent_asset_no ? [assetLink(`#/assets/${a.parent_asset_id}`, a.parent_asset_no), ` ${a.parent_hostname || ""}`] : "-"),
       h("dt", null, "연결 근거"), h("dd", null, [MATCH_LABELS[a.match_by] || a.match_by, flagBadges(a.flags)])));
   }
@@ -916,6 +930,7 @@
       title.textContent = `자산 (${rows.length})`;
       clear(body).append(table([
         { title: "자산번호", nowrap: true, sort: (r) => (r.asset ? r.asset.asset_no : null), render: (r) => (r.asset ? assetLink(`#/assets/${r.asset.id}`, r.asset.asset_no) : h("span", { class: "muted" }, "-")) },
+        { title: "담당자", cls: "asset-owners", sort: (r) => `${r.asset?.primary_owner || ""} ${r.asset?.secondary_owner || ""}`, render: (r) => assetOwnerCell(r.asset) },
         { title: "구분", sort: (r) => kindLabel(r.kind), render: kindBadge },
         { title: "호스트", sort: (r) => r.hostname, render: (r) => (r.host_id ? link(r.hostname, `#/hosts/${enc(r.host_id)}`) : h("span", { class: "muted", title: "에이전트가 아직 수집하지 않음" }, r.hostname || "-")) },
         { title: "도메인", sort: (r) => r.domain, render: (r) => r.domain || "-" },
@@ -932,7 +947,7 @@
       try { const rows = await api(`/v1/assets?${params()}`); if (mine === seq && alive()) draw(rows); }
       catch (err) { if (mine === seq && alive()) clear(body).append(h("div", { class: "error", role: "alert" }, errMsg(err, "불러오지 못했습니다"))); }
     };
-    const search = h("input", { type: "search", placeholder: "자산번호·호스트·IP·시리얼·도메인 검색", "aria-label": "자산 검색", value: st.q, size: 32 });
+    const search = h("input", { type: "search", placeholder: "자산번호·호스트·IP·시리얼·도메인·담당자 검색", "aria-label": "자산 검색", value: st.q, size: 32 });
     liveInput(search, st, "#/assets", reload, alive);
     draw(first);
     const sel = (label, name, options) => h("select", { "aria-label": label, onchange: (e) => apply({ [name]: e.target.value }) },
@@ -1031,6 +1046,7 @@
         h("dt", null, "시리얼"), h("dd", null, detail.asset.serial || "-"),
         h("dt", null, "호스트명 / 도메인"), h("dd", null, `${detail.asset.hostname || "-"} · ${detail.asset.domain || "-"}`),
         h("dt", null, "대장 관리 IP"), h("dd", { class: "mono" }, detail.asset.ip || "-"),
+        ...assetOwnerDetails(detail.asset),
         h("dt", null, "비고"), h("dd", null, detail.asset.note || "-"),
         h("dt", null, "상태 / 연결 근거"), h("dd", null, badge(ASSET_STATUS[detail.status]?.[0] || detail.status, ASSET_STATUS[detail.status]?.[1]), detail.match_by ? ` · ${MATCH_LABELS[detail.match_by]}` : ""),
         h("dt", null, "수집 호스트"), h("dd", null, detail.host_id ? link(detail.hostname, `#/hosts/${enc(detail.host_id)}`) : h("span", { class: "muted" }, "호스트 미수집")),
@@ -1118,7 +1134,8 @@
       kindUnclear = !["physical", "virtual"].includes(hw.kind);
       prefill = { kind: kindUnclear ? "" : hw.kind, serial: hw.serial || "", hostname: d.host.hostname, domain: hw.domain || "", ip: v4, host_id: d.host.host_id };
     }
-    const a = row ? row.asset : { asset_no: "", kind: "", serial: "", hostname: "", domain: "", ip: "", parent_asset_id: null, host_id: null, note: "", ...prefill };
+    const a = row ? row.asset : { asset_no: "", kind: "", serial: "", hostname: "", domain: "", ip: "", parent_asset_id: null, host_id: null,
+      primary_owner: "", secondary_owner: "", note: "", ...prefill };
     let expectedRevision = row?.asset.revision ?? null;
     const f = {
       asset_no: h("input", { type: "text", value: a.asset_no, maxlength: 64, required: true, "aria-required": "true" }),
@@ -1132,6 +1149,8 @@
         physical.filter((r) => r.asset && String(r.asset.id) !== String(id)).map((r) => h("option", { value: r.asset.id, selected: r.asset.id === a.parent_asset_id }, `${r.asset.asset_no} · ${r.hostname || "-"}`))),
       host: h("select", null, h("option", { value: "" }, "자동 연결(시리얼·호스트명·IP)"),
         hosts.map((x) => h("option", { value: x.host_id, selected: x.host_id === a.host_id }, `${x.hostname} (${x.ips[0] || x.host_id.slice(0, 8)})`))),
+      primary_owner: h("input", { type: "text", value: a.primary_owner || "", maxlength: 128, placeholder: "이름 또는 식별정보" }),
+      secondary_owner: h("input", { type: "text", value: a.secondary_owner || "", maxlength: 128, placeholder: "이름 또는 식별정보" }),
       note: h("input", { type: "text", value: a.note, maxlength: 500 }),
     };
     f.asset_no.id = "asset-no"; f.kind.id = "asset-kind";
@@ -1143,12 +1162,14 @@
     f.kind.addEventListener("change", () => setFieldError(f.kind, ""));
     const body = () => ({
       asset_no: f.asset_no.value.trim(), kind: f.kind.value, serial: f.serial.value.trim(), hostname: f.hostname.value.trim(), domain: f.domain.value.trim(),
-      ip: f.ip.value.trim(), parent_asset_id: f.parent.value ? Number(f.parent.value) : null, host_id: f.host.value || null, note: f.note.value.trim(),
+      ip: f.ip.value.trim(), parent_asset_id: f.parent.value ? Number(f.parent.value) : null, host_id: f.host.value || null,
+      primary_owner: f.primary_owner.value.trim(), secondary_owner: f.secondary_owner.value.trim(), note: f.note.value.trim(),
     });
     const inputs = { asset_no: f.asset_no, kind: f.kind, serial: f.serial, hostname: f.hostname, domain: f.domain, ip: f.ip,
-      parent_asset_id: f.parent, host_id: f.host, note: f.note };
+      parent_asset_id: f.parent, host_id: f.host, primary_owner: f.primary_owner, secondary_owner: f.secondary_owner, note: f.note };
     const readValues = (asset) => ({ asset_no: asset.asset_no || "", kind: asset.kind || "", serial: asset.serial || "", hostname: asset.hostname || "",
-      domain: asset.domain || "", ip: asset.ip || "", parent_asset_id: asset.parent_asset_id ?? null, host_id: asset.host_id || null, note: asset.note || "" });
+      domain: asset.domain || "", ip: asset.ip || "", parent_asset_id: asset.parent_asset_id ?? null, host_id: asset.host_id || null,
+      primary_owner: asset.primary_owner || "", secondary_owner: asset.secondary_owner || "", note: asset.note || "" });
     let baselineValues = body();
     let draftBaseline = JSON.stringify(baselineValues);
     assetDraftGuard = { hash: location.hash, isDirty: () => JSON.stringify(body()) !== draftBaseline };
@@ -1179,7 +1200,7 @@
       const openedValues = { ...baselineValues };
       const currentValues = body();
       const labels = { asset_no: "자산번호", kind: "구분", serial: "시리얼", hostname: "호스트명", domain: "도메인", ip: "IP",
-        parent_asset_id: "상위 자산", host_id: "수집 호스트", note: "비고" };
+        parent_asset_id: "상위 자산", host_id: "수집 호스트", primary_owner: "담당자(정)", secondary_owner: "담당자(부)", note: "비고" };
       const rows = Object.keys(inputs).map((key) => {
         const localChanged = currentValues[key] !== openedValues[key];
         const remoteChanged = latestValues[key] !== openedValues[key];
@@ -1223,7 +1244,7 @@
       const parts = err.message.split(/;\s*(?=[a-z_]+:\s)/i);
       const first = [];
       for (const part of parts) {
-        const match = part.match(/^(asset_no|kind|serial|hostname|domain|ip|parent_asset_id|host_id|note):\s*(.+)$/i);
+        const match = part.match(/^(asset_no|kind|serial|hostname|domain|ip|parent_asset_id|host_id|primary_owner|secondary_owner|note):\s*(.+)$/i);
         if (!match) continue;
         const el = inputs[match[1]];
         if (!el) continue;
@@ -1280,7 +1301,10 @@
       field("호스트명", f.hostname, "수집된 호스트명과 같으면 자동으로 연결됩니다."), field("도메인", f.domain),
       field("관리 IP", f.ip, "수집된 IP 와 다르면 '불일치'로 표시합니다."),
       field("상위 호스트", f.parent, "VM 이 올라간 물리 장비(구분이 VM 일 때만)."),
-      field("수집 호스트 지정", f.host, "자동 연결이 안 될 때만 직접 지정합니다."), field("비고", f.note),
+      field("수집 호스트 지정", f.host, "자동 연결이 안 될 때만 직접 지정합니다."),
+      field("담당자(정)", f.primary_owner, "로그인 계정과 관계없이 이름이나 식별정보를 자유롭게 입력합니다."),
+      field("담당자(부)", f.secondary_owner, "로그인 계정과 관계없이 이름이나 식별정보를 자유롭게 입력합니다."),
+      field("비고", f.note),
       h("div", { class: "full toolbar" }, saveBtn, removeBtn, msg.el));
     for (const el of Object.values(inputs)) {
       el.addEventListener("input", () => { if (el.fieldError) setFieldError(el, ""); });
