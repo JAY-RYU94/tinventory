@@ -155,7 +155,7 @@ swinventory-agent doctor --config "$env:ProgramData\swinventory\agent.json"     
 
 `/` (ID·비밀번호 로그인 또는 JWT·기존 토큰 접속, 탭을 닫으면 JWT가 지워짐). 빌드 없는 정적 파일을 서버가 직접 서빙한다.
 
-화면 코드는 `app.js`가 경로·세션 상태와 API 호출을 맡고, `ui-table.js`가 native HTML 표·페이지 내 정렬을, `ui-workflow.js`가 승인·소프트웨어·CVE 표의 표현을, `ui-batches.js`가 호스트별 SW 승인 묶음 큐·상세·개별/일괄 결정을 맡도록 나뉘어 있다. `style.css`는 `tokens.css`, `base.css`, `layout.css`, `components.css`를 불러온다. AdminLTE 4.10.2 CSS는 `/vendor/`에서 자체 호스팅하며 런타임 외부 네트워크 의존성은 없다. AdminLTE와 포함된 Bootstrap의 MIT 라이선스 및 출처·무결성 정보는 `src/swinventory/server/web/vendor/`의 `LICENSE`와 `SOURCES.md`에 보존한다.
+화면 코드는 `app.js`가 경로·세션 상태와 API 호출을 맡고, `ui-table.js`가 native HTML 표·페이지 내 정렬을, `ui-workflow.js`가 승인·소프트웨어·CVE 표의 표현을, `ui-batches.js`가 호스트별 SW 승인 요청 큐·상세·개별/일괄 결정을 맡도록 나뉘어 있다. `style.css`는 `tokens.css`, `base.css`, `layout.css`, `components.css`를 불러온다. AdminLTE 4.10.2 CSS는 `/vendor/`에서 자체 호스팅하며 런타임 외부 네트워크 의존성은 없다. AdminLTE와 포함된 Bootstrap의 MIT 라이선스 및 출처·무결성 정보는 `src/swinventory/server/web/vendor/`의 `LICENSE`와 `SOURCES.md`에 보존한다.
 
 | 화면 | 내용 |
 |---|---|
@@ -201,11 +201,11 @@ CSV 는 엑셀 수식 주입(`=`, `+`, `-`, `@` 로 시작하는 셀)을 막는�
 
 분류 키는 수집 출처(`source`), 패키지 이름(`name`), 아키텍처(`arch`)다. 같은 이름이라도 출처나 아키텍처가 다르면 별도 제품으로 다룬다. 설치 요약과 승인 판정은 여기에 호스트와 정확한 버전을 더해 조회한다. 분류되지 않은 제품은 `classification_required`이며, 출처 이름만 보고 업무용·개발용으로 추정하지 않는다. 명시된 OS 패키지와 개발 의존성만 승인 대상이 아닌 `not_required`로 표시한다.
 
-신규 승인 요청은 호스트 하나에서 선택한 업무용 SW 여러 개를 한 묶음으로 제출한다. 각 제품·정확 버전은 독립 요청으로 기록되어 항목별 승인·반려가 가능하고 여러 항목을 한 번에 처리할 수도 있다. 묶음 생성과 선택한 항목의 상태 변경은 원자적이다. 설치 버전이나 분류가 요청 뒤 바뀌면 승인은 거절된다. 목적과 사용권 근거는 묶음에서 한 번 입력하며, 각 child 요청의 개별 상태와 이력은 묶음 상세에서 확인한다.
+신규 승인 요청은 호스트 하나에서 선택한 업무용 SW 여러 개를 한 번에 제출한다. 각 제품·정확 버전은 독립 요청으로 기록되어 항목별 승인·반려가 가능하고 여러 항목을 한 번에 처리할 수도 있다. 요청 생성과 선택한 항목의 상태 변경은 원자적이다. 설치 버전이나 분류가 요청 뒤 바뀌면 승인은 거절된다. 요청 사유는 한 번 입력하며, 각 항목의 개별 상태와 이력은 승인 요청 상세에서 확인한다.
 
 활성 승인에는 해당 호스트와 source/name/arch/version이 모두 맞는 현재 승인만 포함된다. 철회되었거나 유효 기간이 지난 승인은 `not_active`다. 현재 요청 상태는 승인 여부와 별도 필드로 표시되므로 `needs_changes` 같은 요청이 기존 승인을 지우거나 대신하지 않는다. 설치된 버전이 CVE의 확정 영향 버전과 일치하면 `confirmed`, 검토 대기 매핑이 있으면 `needs_review`, 모든 연결 판정이 명시적으로 `not_affected`이면 `not_affected`, 제품 매핑은 있지만 설치 버전이 확정 영향 버전과 다르면 `no_observed_match`, 연결된 CVE 판정이 없으면 `not_assessed`다. 마지막 두 상태를 안전 판정으로 취급하지 않는다.
 
-조회 역할은 호스트 소프트웨어 요약을 볼 수 있지만 승인 요청 상태와 요청 번호는 받지 않는다. 요청 권한 계정은 본인 묶음만, 관리자는 전체 묶음을 조회한다. `assigned_to_me=true`는 관리자 세션의 담당자 필터이며 `mine=true`는 요청자 본인 필터다. batch 큐의 `scope`는 `pending|all|assigned|overdue`이며, 기본 정렬은 미완료 우선·기한 오름차순(기한 없음은 뒤)·생성 시각과 묶음 ID 순이다. `status`와 `security_impact`를 함께 지정하면 같은 child가 두 조건을 모두 만족해야 한다. 정렬은 `sort=host|requester|status|due|batch_no` 및 `direction=asc|desc`를 지원하며, 필터·정렬·전체 건수 계산은 페이지 자르기 전에 적용한다.
+조회 역할은 호스트 소프트웨어 요약을 볼 수 있지만 승인 요청 상태와 요청 번호는 받지 않는다. 요청 권한 계정은 본인 요청만, 관리자는 전체 요청을 조회한다. `assigned_to_me=true`는 관리자 세션의 담당자 필터이며 `mine=true`는 요청자 본인 필터다. 승인 요청 큐의 `scope`는 `pending|all|assigned|overdue`이며, 기본 정렬은 미완료 우선·기한 오름차순(기한 없음은 뒤)·생성 시각과 요청 ID 순이다. `status`와 `security_impact`를 함께 지정하면 같은 child가 두 조건을 모두 만족해야 한다. 정렬은 `sort=host|requester|status|due|batch_no` 및 `direction=asc|desc`를 지원하며, 필터·정렬·전체 건수 계산은 페이지 자르기 전에 적용한다.
 
 취약점 목록의 `product_source`, `product_name`, `product_arch`, `product_version`, `host`는 정확 일치 필터다. `q` 텍스트 검색과 별도이며, 빈 설치 버전도 정확한 빈 문자열로 조회할 수 있다. 목록의 영향별 호스트 수는 실제 설치와 매핑 근거를 기준으로 고유 호스트 수를 집계한다. `not_assessed`의 전체 호스트 수는 기준이 모호해 반환하지 않는다. CVE 상세는 기존 `installations` 근거를 유지하고 `observed_installations`에 해당 제품의 다른 설치 버전과 개별 판정을 추가한다.
 
@@ -344,10 +344,10 @@ base URL 의 scheme, 호스트 또는 포트를 바꾸면 기존 추가 헤더 �
 | GET | `/v1/software-hosts?q=&host=` | 서버별 설치 항목 수(패키지 본문 제외), 서버·패키지 이름 필터 |
 | GET | `/v1/software?q=` , `/v1/software/{name}?host=&version=&below=&format=csv` | 패키지 검색 / 버전 분포 + 설치 호스트(`version`=정확히 일치, `below`=그 버전 미만 — 분포는 선택한 서버 범위 전체, version·below는 호스트 목록·CSV 만 좁힌다) |
 | GET | `/v1/software-products?q=&category=` , `/v1/hosts/{id}/software-summary` | 업무용 앱 분류 목록 / 호스트의 source/name/arch/version별 분류·승인·CVE 영향 요약(read) |
-| GET | `/v1/software-request-batches?scope=&status=&host=&security_impact=&assigned_to_me=&sort=&direction=&page=` | 호스트별 승인 요청 묶음 큐(request는 본인, admin은 전체·담당자 필터) |
-| POST | `/v1/software-request-batches` | `{host_id,items:[{source,name,arch,version}],purpose,license_evidence}` 생성(request 개인 세션) |
-| GET | `/v1/software-request-batches/{id}` | 묶음과 호스트·항목별 상세(request 본인/admin) |
-| POST | `/v1/software-request-batches/{id}/actions` | 묶음의 선택한 child 요청에 개별 또는 원자적 일괄 배정·보완·승인·반려·철회·승인 취소. 승인 결정은 관리자 개인 세션 필요 |
+| GET | `/v1/software-request-batches?scope=&status=&host=&security_impact=&assigned_to_me=&sort=&direction=&page=` | 호스트별 승인 요청 큐(request는 본인, admin은 전체·담당자 필터) |
+| POST | `/v1/software-request-batches` | `{host_id,items:[{source,name,arch,version}],purpose}` 생성(request 개인 세션) |
+| GET | `/v1/software-request-batches/{id}` | 승인 요청과 호스트·항목별 상세(request 본인/admin) |
+| POST | `/v1/software-request-batches/{id}/actions` | 승인 요청의 선택 항목에 개별 또는 원자적 일괄 배정·보완·승인·반려·철회·승인 취소. 승인 결정은 관리자 개인 세션 필요 |
 | GET | `/v1/software-requests?pending=&assigned_to_me=&security_impact=&sort=&direction=&page=` | SW 승인 요청 큐. 요청자는 본인 요청만, 관리자는 전체 또는 담당자 본인 필터(request/admin) |
 | GET, POST | `/v1/software-requests` , `/v1/software-requests/{id}/actions` | 요청 생성·본인 요청 조회(request) / 배정·보완·승인·반려·철회·승인 취소(권한별) |
 | GET | `/v1/events?host=&type=&since=&limit=&format=csv` | 변경 이력 |

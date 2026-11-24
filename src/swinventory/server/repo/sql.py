@@ -55,6 +55,7 @@ class SqlInventoryRepository(InventoryRepository):
         with engine.begin() as c:
             self._migrate_assets(c)
             self._migrate_vulnerability_feed_data_version(c)
+            self._migrate_removed_license_evidence(c)
         # 첫 행 생성도 여러 프로세스에서 멱등이다. 아래 UPDATE 가 DB 간 공통 쓰기 잠금이다.
         if engine.dialect.name == "postgresql":
             from sqlalchemy.dialects.postgresql import insert as guard_insert
@@ -96,6 +97,18 @@ class SqlInventoryRepository(InventoryRepository):
         column_type = column["type"]
         if isinstance(column_type, String) and not isinstance(column_type, Text) and column_type.length is not None:
             conn.execute(text("ALTER TABLE vulnerability_feed_status ALTER COLUMN data_version TYPE TEXT"))
+
+    @staticmethod
+    def _migrate_removed_license_evidence(conn: Connection) -> None:
+        """기존 두 요청 테이블에서 사용하지 않는 근거 열만 제거한다."""
+        inspector = inspect(conn)
+        tables = set(inspector.get_table_names())
+        for table_name in ("software_requests", "software_request_batches"):
+            if table_name not in tables:
+                continue
+            columns = {column["name"] for column in inspector.get_columns(table_name)}
+            if "license_evidence" in columns:
+                conn.execute(text(f"ALTER TABLE {table_name} DROP COLUMN license_evidence"))
 
     @classmethod
     def from_url(cls, url: str) -> "SqlInventoryRepository":
@@ -971,7 +984,7 @@ class SqlInventoryRepository(InventoryRepository):
                 if active:
                     raise ConflictError("already approved")
             result = c.execute(insert(batches).values(requester_id=actor_id, host_id=host_id,
-                purpose=batch["purpose"], license_evidence=batch["license_evidence"], created_at=at))
+                purpose=batch["purpose"], created_at=at))
             batch_id = int(result.inserted_primary_key[0])
             for order, item in enumerate(items):
                 product = c.execute(select(classification.c.product_name).where(and_(
@@ -979,7 +992,7 @@ class SqlInventoryRepository(InventoryRepository):
                     classification.c.arch == item["arch"]))).scalar_one()
                 values = {"requester_id": actor_id, **item,
                     "product_name": product or item["name"], "purpose": batch["purpose"],
-                    "license_evidence": batch["license_evidence"], "assignee_id": None,
+                    "assignee_id": None,
                     "due_at": None, "approval_until": None, "decision_reason": ""}
                 inserted = c.execute(insert(t).values(**values, status="submitted", revision=1,
                     created_at=at, updated_at=at))
@@ -1009,7 +1022,7 @@ class SqlInventoryRepository(InventoryRepository):
             and_(bi.c.batch_id == b.c.id, cond)).correlate(b))
         stmt = (select(b.c.id, b.c.host_id, host.c.hostname, host.c.last_seen,
                        b.c.requester_id, requester.c.username.label("requester_name"),
-                       b.c.created_at, b.c.purpose, b.c.license_evidence)
+                       b.c.created_at, b.c.purpose)
                 .select_from(b.join(requester, requester.c.id == b.c.requester_id)
                     .outerjoin(host, host.c.host_id == b.c.host_id)))
         if requester_id:

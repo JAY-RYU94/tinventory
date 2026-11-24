@@ -310,8 +310,7 @@ td.asset-owners { width: 12em; min-width: 12em; max-width: 12em; }
 .batch-detail-context strong { font-weight: 500; }
 .batch-detail-meta { color: var(--muted); font-size: 13px; }
 .batch-detail-status { text-align: right; }
-.batch-detail-reasons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 20px; margin: 10px 0; }
-.batch-detail-reasons section { min-width: 0; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.batch-detail-reasons { margin: 10px 0; padding: 8px 0; border-bottom: 1px solid var(--line); }
 .batch-detail-reasons h2 { margin: 0 0 5px; color: var(--muted); font-size: 13px; font-weight: 500; }
 .batch-detail-reasons p, .batch-item-current-request p, .batch-item-decision p,
 .batch-action-targets { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -365,7 +364,6 @@ td.asset-owners { width: 12em; min-width: 12em; max-width: 12em; }
   .batch-selection-actions { width: 100%; }
   .batch-selection-actions button { flex: 1 1 auto; }
   .batch-request-dialog { max-height: calc(100dvh - 24px); padding: 16px; overflow: auto; }
-  .batch-detail-reasons { grid-template-columns: minmax(0, 1fr); gap: 4px; }
   .batch-detail-status { text-align: left; }
   .batch-detail-selection-tools, .batch-bulk-toolbar { align-items: flex-start; }
   .batch-detail-selection-tools .batch-selection-count, .batch-bulk-toolbar .batch-selection-count { flex: 1 1 100%; }

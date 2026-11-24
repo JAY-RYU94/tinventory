@@ -54,7 +54,7 @@ def test_read_only_and_unclassified_packages_cannot_request(client):
     assert client.get("/v1/software-products", headers=RD).status_code == 200
     assert client.get("/v1/software-products", headers=RD).json()["items"][0]["category"] == "needs_review"
     body = {"source": "dpkg", "name": "CorpDesk", "arch": "amd64", "version": "1.2.3",
-            "purpose": "고객 문서 작성", "license_evidence": "계약서 LIC-42", "host_ids": ["host-a"]}
+            "purpose": "고객 문서 작성", "host_ids": ["host-a"]}
     assert client.post("/v1/software-requests", headers=RD, json=body).status_code == 403
     # 업무용으로 확인되지 않은 앱과 개발 의존성은 요청 API에서도 차단한다.
     scope = client.put(f"/v1/software-request-scopes/{requester['id']}", headers=AD,
@@ -74,10 +74,13 @@ def test_request_scope_queue_revisions_decisions_and_approval_expiry(client):
                       json={"host_ids": ["host-a"]}).status_code == 200
 
     body = {"source": "dpkg", "name": "CorpDesk", "arch": "amd64", "version": "1.2.3",
-            "purpose": "고객 문서 작성", "license_evidence": "계약서 LIC-42", "host_ids": ["host-a"]}
+            "purpose": "고객 문서 작성", "host_ids": ["host-a"]}
+    removed_field = {**body, "license_evidence": "예전 필드"}
+    assert client.post("/v1/software-requests", headers=request_headers, json=removed_field).status_code == 422
     created = client.post("/v1/software-requests", headers=request_headers, json=body)
     assert created.status_code == 201, created.text
     item = created.json()
+    assert "license_evidence" not in item
     assert item["request_no"].startswith("SW-") and item["status"] == "submitted"
     assert client.post("/v1/software-requests", headers=request_headers, json=body).status_code == 409
     assert client.get("/v1/software-requests", headers=RD).status_code == 403
@@ -97,12 +100,13 @@ def test_request_scope_queue_revisions_decisions_and_approval_expiry(client):
     assert assigned.status_code == 200, assigned.text
     assert assigned.json()["status"] == "reviewing" and assigned.json()["revision"] == 2
     changed = client.post(f"/v1/software-requests/{item['id']}/actions", headers=admin_headers,
-        json={"action": "request_changes", "expected_revision": 2, "reason": "사용 범위의 근거를 보완하세요."})
+        json={"action": "request_changes", "expected_revision": 2, "reason": "사용 목적을 구체적으로 적어 주세요."})
     assert changed.status_code == 200 and changed.json()["status"] == "needs_changes"
     resubmitted = client.post(f"/v1/software-requests/{item['id']}/actions", headers=request_headers,
-        json={"action": "resubmit", "expected_revision": 3, "purpose": "고객 문서 편집", "license_evidence": "갱신 계약 LIC-43"})
+        json={"action": "resubmit", "expected_revision": 3, "purpose": "고객 문서 편집"})
     assert resubmitted.status_code == 200 and resubmitted.json()["id"] == item["id"]
     assert resubmitted.json()["revision"] == 4 and resubmitted.json()["status"] == "submitted"
+    assert "license_evidence" not in resubmitted.json()
     assert len(resubmitted.json()["history"]) == 4
     # 오래된 편집 화면의 revision은 결정을 덮어쓰지 못한다.
     stale = client.post(f"/v1/software-requests/{item['id']}/actions", headers=admin_headers,
@@ -114,12 +118,12 @@ def test_request_scope_queue_revisions_decisions_and_approval_expiry(client):
     assert assigned.status_code == 200
     until = "2027-11-30T23:59:59+09:00"
     approved = client.post(f"/v1/software-requests/{item['id']}/actions", headers=admin_headers,
-        json={"action": "approve", "expected_revision": 5, "reason": "업무 필요와 사용권 확인",
+        json={"action": "approve", "expected_revision": 5, "reason": "업무상 필요를 확인했습니다.",
               "approval_until": until})
     assert approved.status_code == 200 and approved.json()["status"] == "approved"
     assert approved.json()["approvals"][0]["effective_state"] == "active"
     already = client.post("/v1/software-requests", headers=request_headers, json=body)
-    assert already.status_code == 409 and already.json()["detail"]["kind"] == "already_approved"
+    assert already.status_code == 409 and already.json()["detail"] == "유효한 승인이 이미 있습니다."
     cancelled = client.post(f"/v1/software-requests/{item['id']}/actions", headers=admin_headers,
         json={"action": "revoke_approval", "expected_revision": 6, "reason": "계약 종료"})
     assert cancelled.status_code == 200
@@ -138,7 +142,7 @@ def test_scope_requires_admin_session_and_business_app_classification(client):
     assert client.put(f"/v1/software-request-scopes/{requester['id']}", headers=admin_headers,
                       json={"host_ids": ["host-a"]}).status_code == 200
     body = {"source": "dpkg", "name": "libengine-dev", "arch": "amd64", "version": "2.0",
-            "purpose": "업무용 개발도구 필요", "license_evidence": "OSS notice", "host_ids": ["host-a"]}
+            "purpose": "업무용 개발도구 필요", "host_ids": ["host-a"]}
     response = client.post("/v1/software-requests", headers=request_headers, json=body)
     assert response.status_code == 422
     assert client.put(f"/v1/software-request-scopes/{requester['id']}", headers=admin_headers,

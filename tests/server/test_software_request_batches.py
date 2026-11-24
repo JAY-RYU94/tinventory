@@ -1,10 +1,13 @@
 """호스트별 소프트웨어 요청 묶음과 원자적 개별·일괄 결정을 검증한다."""
 import pytest
+from sqlalchemy import inspect, text
 from fastapi.testclient import TestClient
 
 from swinventory.common.models import PackageRecord
 from swinventory.server.app import ApiSettings, create_app
 from swinventory.server.repo.base import ConflictError
+from swinventory.server.repo.schema import software_request_batches, software_requests
+from swinventory.server.repo.sql import SqlInventoryRepository
 from tests.server.conftest import make_snapshot
 from tests.server.test_api import AD, ING, RD
 
@@ -61,8 +64,7 @@ def _batch_body(host_id="host-a", items=None):
     return {"host_id": host_id, "items": items or [
         {"source": "dpkg", "name": "CorpDesk", "arch": "amd64", "version": "1.2.3"},
         {"source": "dpkg", "name": "CorpNotes", "arch": "amd64", "version": "4.5"},
-    ], "purpose": "고객 문서 작성과 내부 업무에 사용합니다.",
-        "license_evidence": "계약서 LIC-2026-4와 사용권 범위를 확인했습니다."}
+    ], "purpose": "고객 문서 작성과 내부 업무에 사용합니다."}
 
 
 def _setup(client):
@@ -86,11 +88,14 @@ def test_batch_create_is_host_scoped_private_and_atomic_on_invalid_item(client):
     assert batch["host_id"] == "host-a" and batch["requester_id"] == requester["id"]
     assert batch["status"] == "submitted" and batch["status_counts"]["submitted"] == 2
     assert batch["pending_count"] == 2 and batch["terminal_count"] == 0
+    assert "license_evidence" not in batch
+    assert "license_evidence" not in batch["items"][0]
+    assert "license_evidence" not in software_request_batches.c
+    assert "license_evidence" not in software_requests.c
     assert len(batch["items"]) == 2
     for item in batch["items"]:
         assert item["host_ids"] == ["host-a"]
         assert item["purpose"] == batch["purpose"]
-        assert item["license_evidence"] == batch["license_evidence"]
         assert item["current_installed"] is True
         assert item["approval_status"] == "not_active"
         assert item["security_impact"]["status"] == "not_assessed"
@@ -147,6 +152,9 @@ def test_batch_create_is_host_scoped_private_and_atomic_on_invalid_item(client):
     short_purpose = _batch_body(items=[{"source": "dpkg", "name": "CorpWrite", "arch": "amd64", "version": "9.0"}])
     short_purpose["purpose"] = "x    "
     assert client.post("/v1/software-request-batches", headers=request_headers, json=short_purpose).status_code == 422
+    removed_field = _batch_body(items=[{"source": "dpkg", "name": "CorpWrite", "arch": "amd64", "version": "9.0"}])
+    removed_field["license_evidence"] = "예전 필드"
+    assert client.post("/v1/software-request-batches", headers=request_headers, json=removed_field).status_code == 422
     # Request-role credentials must be a user's personal session, not an API token.
     assert client.post("/v1/software-request-batches", headers=ING, json=_batch_body()).status_code in {401, 403}
     assert client.post("/v1/software-request-batches", headers=AD, json=_batch_body()).status_code in {401, 403}
@@ -171,7 +179,7 @@ def test_batch_selected_actions_are_per_item_and_atomic(client):
 
     # One stale selected revision rejects the complete multi-item mutation.
     stale = client.post(f"/v1/software-request-batches/{created['id']}/actions", headers=admin, json={
-        "action": "approve", "reason": "업무와 사용권을 확인했습니다.", "approval_until": "2027-01-01T00:00:00Z",
+        "action": "approve", "reason": "업무상 필요를 확인했습니다.", "approval_until": "2027-01-01T00:00:00Z",
         "items": [{"request_id": ids[0], "expected_revision": 2},
                   {"request_id": ids[1], "expected_revision": 1}],
     })
@@ -191,7 +199,7 @@ def test_batch_selected_actions_are_per_item_and_atomic(client):
 
     # Different decisions remain possible within the same host batch.
     approved = client.post(f"/v1/software-request-batches/{created['id']}/actions", headers=admin, json={
-        "action": "approve", "reason": "승인 대상의 필요와 사용권을 확인했습니다.",
+        "action": "approve", "reason": "승인 대상의 업무상 필요를 확인했습니다.",
         "approval_until": "2027-01-01T00:00:00Z",
         "items": [{"request_id": ids[0], "expected_revision": 2}],
     })
@@ -269,6 +277,59 @@ def test_batch_approval_rechecks_exact_current_classification_and_installation(c
     batch_item = client.get(f"/v1/software-request-batches/{created['id']}", headers=admin).json()["items"][0]
     assert batch_item["status"] == "reviewing" and batch_item["current_installed"] is False
     assert batch_item["approvals"] == []
+
+
+def test_batch_resubmit_needs_only_purpose_and_response_has_no_license_field(client):
+    admin_user, requester, admin, request_headers = _setup(client)
+    body = _batch_body(items=[{"source": "dpkg", "name": "CorpWrite", "arch": "amd64", "version": "9.0"}])
+    created = client.post("/v1/software-request-batches", headers=request_headers, json=body)
+    assert created.status_code == 201, created.text
+    batch = created.json()
+    assert "license_evidence" not in batch and "license_evidence" not in batch["items"][0]
+    request_id = batch["items"][0]["id"]
+    changes = client.post(f"/v1/software-request-batches/{batch['id']}/actions", headers=admin, json={
+        "action": "request_changes", "reason": "업무 목적을 구체적으로 적어 주세요.",
+        "items": [{"request_id": request_id, "expected_revision": 1}],
+    })
+    assert changes.status_code == 200, changes.text
+    assert changes.json()["items"][0]["status"] == "needs_changes"
+    resubmitted = client.post(f"/v1/software-request-batches/{batch['id']}/actions", headers=request_headers, json={
+        "action": "resubmit", "purpose": "문서 작성 업무에 필요한 앱입니다.",
+        "items": [{"request_id": request_id, "expected_revision": 2}],
+    })
+    assert resubmitted.status_code == 200, resubmitted.text
+    child = resubmitted.json()["items"][0]
+    assert child["status"] == "submitted" and child["revision"] == 3
+    assert child["purpose"] == "문서 작성 업무에 필요한 앱입니다."
+    assert "license_evidence" not in resubmitted.json() and "license_evidence" not in child
+
+
+def test_removed_license_columns_migrate_idempotently_without_losing_requests(client, repo):
+    admin_user, requester, admin, request_headers = _setup(client)
+    created = client.post("/v1/software-request-batches", headers=request_headers, json=_batch_body(items=[
+        {"source": "dpkg", "name": "CorpWrite", "arch": "amd64", "version": "9.0"},
+    ]))
+    assert created.status_code == 201, created.text
+    batch = created.json()
+    item_id = batch["items"][0]["id"]
+
+    # 기존 설치에서 남아 있을 수 있는 두 필드만 만들고 repository 재시작 migration을 흉내 낸다.
+    for table_name in ("software_requests", "software_request_batches"):
+        columns = {column["name"] for column in inspect(repo._engine).get_columns(table_name)}
+        if "license_evidence" not in columns:
+            with repo._engine.begin() as connection:
+                connection.execute(text(
+                    f"ALTER TABLE {table_name} ADD COLUMN license_evidence VARCHAR(2000) NOT NULL DEFAULT ''"))
+
+    SqlInventoryRepository(repo._engine)
+    repeated = SqlInventoryRepository(repo._engine)
+    for table_name in ("software_requests", "software_request_batches"):
+        columns = {column["name"] for column in inspect(repo._engine).get_columns(table_name)}
+        assert "license_evidence" not in columns
+        assert {"id", "purpose"} <= columns
+    preserved = repeated.get_software_request_batch(batch["id"], "2026-11-24T00:00:00Z")
+    assert preserved is not None and preserved["purpose"] == batch["purpose"]
+    assert preserved["items"][0]["id"] == item_id and preserved["items"][0]["purpose"] == batch["purpose"]
 
 
 def test_batch_queue_filters_aggregate_and_sort_before_pagination(client, repo):
@@ -364,13 +425,13 @@ def test_batch_action_database_failure_rolls_back_prior_child_writes(client, rep
     install = items[ids[1]]
     invalid_approval = {
         "request_id": ids[1], "expected_revision": 2, "action": "approve",
-        "values": {"status": "approved"}, "reason": "업무와 사용권을 확인했습니다.", "detail": {},
+        "values": {"status": "approved"}, "reason": "업무상 필요를 확인했습니다.", "detail": {},
         "approvals": [{
             "request_id": ids[1], "source": install["source"], "name": install["name"],
             "arch": install["arch"], "version": install["version"], "host_id": "host-a",
             "state": "active", "valid_from": "2026-11-24T00:00:00Z",
             "valid_until": "2027-01-01T00:00:00Z", "decided_by": "missing-user",
-            "reason": "업무와 사용권을 확인했습니다.", "ended_at": None, "end_reason": "",
+            "reason": "업무상 필요를 확인했습니다.", "ended_at": None, "end_reason": "",
         }], "revoke_approvals": False,
     }
     with pytest.raises(ConflictError):

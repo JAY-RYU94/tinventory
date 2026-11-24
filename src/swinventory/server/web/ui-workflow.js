@@ -39,7 +39,7 @@
         },
         { title: "버전", cls: "approval-version", render: (row) => plain(row.version) },
         { title: "요청 상태", cls: "approval-request-state", serverSort: "status", render: (row) => requestState(row.status) },
-        { title: "보안 판정", cls: "approval-security", serverSort: "security", render: (row) => impactState(row.security_impact?.status || row.security_impact) },
+        { title: "보안 영향", cls: "approval-security", serverSort: "security", render: (row) => impactState(row.security_impact?.status || row.security_impact) },
         { title: "대상", cls: "approval-targets", align: "right", serverSort: "targets", render: (row) => plain(`${row.host_count}대`, "tabular-nums") },
         { title: "요청자", cls: "approval-requester", serverSort: "requester", render: (row) => plain(row.requester_name) },
         { title: "검토자", cls: "approval-reviewer", serverSort: "assignee", render: (row) => plain(row.assignee_name || "미배정") },

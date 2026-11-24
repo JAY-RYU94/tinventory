@@ -48,7 +48,7 @@ def _match(repo, cve_id: str, source: str, name: str, arch: str, status: str, ac
 def _request_values(requester_id: str, name: str, version: str = "1") -> dict:
     return {"requester_id": requester_id, "source": "dpkg", "name": name, "arch": "amd64",
         "product_name": name, "version": version, "purpose": "업무 처리에 필요합니다.",
-        "license_evidence": "계약 확인 완료", "assignee_id": None, "due_at": None,
+        "assignee_id": None, "due_at": None,
         "approval_until": None, "decision_reason": ""}
 
 
@@ -145,17 +145,17 @@ def test_host_software_summary_keeps_approval_request_and_classification_distinc
         json={"host_ids": ["host-a", "host-b"]}).status_code == 200
 
     body = {"source": "dpkg", "name": "CorpDesk", "arch": "amd64", "version": "1.2.3",
-        "purpose": "고객 지원 업무를 처리합니다.", "license_evidence": "계약 LIC-42",
-        "host_ids": ["host-a"]}
+        "purpose": "고객 지원 업무를 처리합니다.", "host_ids": ["host-a"]}
     created = client.post("/v1/software-requests", headers=request_headers, json=body)
     assert created.status_code == 201, created.text
+    assert "license_evidence" not in created.json()
     request_id = created.json()["id"]
     assigned = client.post(f"/v1/software-requests/{request_id}/actions", headers=admin, json={
         "action": "assign", "expected_revision": 1, "assignee_id": admin_user["id"],
         "due_at": "2026-11-20T00:00:00Z"})
     assert assigned.status_code == 200, assigned.text
     approved = client.post(f"/v1/software-requests/{request_id}/actions", headers=admin, json={
-        "action": "approve", "expected_revision": 2, "reason": "사용권과 업무 필요를 확인했습니다.",
+        "action": "approve", "expected_revision": 2, "reason": "업무상 필요를 확인했습니다.",
         "approval_until": "2026-12-01T00:00:00Z"})
     assert approved.status_code == 200, approved.text
 
@@ -198,7 +198,7 @@ def test_host_software_summary_keeps_approval_request_and_classification_distinc
         "due_at": "2026-11-20T00:00:00Z"})
     assert assigned.status_code == 200, assigned.text
     approved = client.post(f"/v1/software-requests/{second_id}/actions", headers=admin, json={
-        "action": "approve", "expected_revision": 2, "reason": "사용권과 업무 필요를 확인했습니다.",
+        "action": "approve", "expected_revision": 2, "reason": "업무상 필요를 확인했습니다.",
         "approval_until": "2026-12-01T00:00:00Z"})
     assert approved.status_code == 200, approved.text
     revoked = client.post(f"/v1/software-requests/{second_id}/actions", headers=admin, json={

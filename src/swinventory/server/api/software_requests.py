@@ -42,15 +42,14 @@ class Classification(Input):
         return value
 
 class NewRequest(Input):
-    source: str = Field(min_length=1, max_length=64)
-    name: str = Field(min_length=1, max_length=512)
+    source: str = Field(max_length=64)
+    name: str = Field(max_length=512)
     arch: str = Field(max_length=32)
-    version: str = Field(min_length=1, max_length=256)
-    purpose: str = Field(min_length=5, max_length=2000)
-    license_evidence: str = Field(min_length=3, max_length=2000)
+    version: str = Field(max_length=256)
+    purpose: str = Field(max_length=2000)
     host_ids: list[str] = Field(min_length=1, max_length=100)
 
-    @field_validator("source", "name", "arch", "version", "purpose", "license_evidence")
+    @field_validator("source", "name", "arch", "version", "purpose")
     @classmethod
     def clean_text(cls, value: str) -> str:
         value = value.strip()
@@ -58,7 +57,7 @@ class NewRequest(Input):
             raise ValueError("제어문자를 사용할 수 없습니다.")
         return value
 
-    @field_validator("source", "name", "version", "purpose", "license_evidence")
+    @field_validator("source", "name", "version")
     @classmethod
     def require_nonblank(cls, value: str) -> str:
         if not value:
@@ -78,8 +77,8 @@ class NewRequest(Input):
     def enforce_lengths_after_strip(self):
         if len(self.source) < 1 or len(self.name) < 1 or len(self.version) < 1:
             raise ValueError("제품 식별값과 버전을 확인하세요.")
-        if len(self.purpose) < 5 or len(self.license_evidence) < 3:
-            raise ValueError("목적과 사용권 근거를 확인하세요.")
+        if len(self.purpose) < 5:
+            raise ValueError("요청 사유는 5자 이상 입력하세요.")
         return self
 
 
@@ -90,10 +89,9 @@ class RequestAction(Input):
     assignee_id: str | None = Field(default=None, max_length=32)
     due_at: str | None = Field(default=None, max_length=64)
     approval_until: str | None = Field(default=None, max_length=64)
-    purpose: str | None = Field(default=None, min_length=5, max_length=2000)
-    license_evidence: str | None = Field(default=None, min_length=3, max_length=2000)
+    purpose: str | None = Field(default=None, max_length=2000)
 
-    @field_validator("reason", "purpose", "license_evidence")
+    @field_validator("reason", "purpose")
     @classmethod
     def clean_text(cls, value: str | None) -> str | None:
         if value is None:
@@ -106,17 +104,15 @@ class RequestAction(Input):
     @model_validator(mode="after")
     def enforce_resubmission_lengths(self):
         if self.purpose is not None and len(self.purpose) < 5:
-            raise ValueError("목적을 확인하세요.")
-        if self.license_evidence is not None and len(self.license_evidence) < 3:
-            raise ValueError("사용권 근거를 확인하세요.")
+            raise ValueError("요청 사유는 5자 이상 입력하세요.")
         return self
 
 
 class BatchItem(Input):
-    source: str = Field(min_length=1, max_length=64)
-    name: str = Field(min_length=1, max_length=512)
+    source: str = Field(max_length=64)
+    name: str = Field(max_length=512)
     arch: str = Field(max_length=32)
-    version: str = Field(min_length=1, max_length=256)
+    version: str = Field(max_length=256)
 
     @field_validator("source", "name", "arch", "version")
     @classmethod
@@ -135,23 +131,30 @@ class BatchItem(Input):
 
 
 class NewBatch(Input):
-    host_id: str = Field(min_length=1, max_length=128)
+    host_id: str = Field(max_length=128)
     items: list[BatchItem] = Field(min_length=1, max_length=100)
-    purpose: str = Field(min_length=5, max_length=2000)
-    license_evidence: str = Field(min_length=3, max_length=2000)
+    purpose: str = Field(max_length=2000)
 
-    @field_validator("host_id", "purpose", "license_evidence")
+    @field_validator("host_id")
     @classmethod
-    def clean_batch_text(cls, value: str) -> str:
+    def clean_host_id(cls, value: str) -> str:
         value = value.strip()
         if not value or has_control(value):
-            raise ValueError("입력값을 확인하세요.")
+            raise ValueError("호스트를 확인하세요.")
+        return value
+
+    @field_validator("purpose")
+    @classmethod
+    def clean_purpose(cls, value: str) -> str:
+        value = value.strip()
+        if has_control(value):
+            raise ValueError("제어문자를 사용할 수 없습니다.")
         return value
 
     @model_validator(mode="after")
     def enforce_shared_field_lengths(self):
-        if len(self.purpose) < 5 or len(self.license_evidence) < 3:
-            raise ValueError("목적과 사용권 근거를 확인하세요.")
+        if len(self.purpose) < 5:
+            raise ValueError("요청 사유는 5자 이상 입력하세요.")
         return self
 
     @model_validator(mode="after")
@@ -174,10 +177,9 @@ class BatchAction(Input):
     assignee_id: str | None = Field(default=None, max_length=32)
     due_at: str | None = Field(default=None, max_length=64)
     approval_until: str | None = Field(default=None, max_length=64)
-    purpose: str | None = Field(default=None, min_length=5, max_length=2000)
-    license_evidence: str | None = Field(default=None, min_length=3, max_length=2000)
+    purpose: str | None = Field(default=None, max_length=2000)
 
-    @field_validator("reason", "purpose", "license_evidence")
+    @field_validator("reason", "purpose")
     @classmethod
     def clean_batch_action_text(cls, value: str | None) -> str | None:
         if value is None:
@@ -190,9 +192,7 @@ class BatchAction(Input):
     @model_validator(mode="after")
     def enforce_resubmission_lengths(self):
         if self.purpose is not None and len(self.purpose) < 5:
-            raise ValueError("목적을 확인하세요.")
-        if self.license_evidence is not None and len(self.license_evidence) < 3:
-            raise ValueError("사용권 근거를 확인하세요.")
+            raise ValueError("요청 사유는 5자 이상 입력하세요.")
         return self
 
     @model_validator(mode="after")
@@ -219,12 +219,12 @@ def _actor(accounts: Accounts, authorization: str | None, role: str) -> dict:
 def _conflict_message(error: ConflictError) -> str:
     message = str(error)
     if message == "exact installed business application changed":
-        return "요청 이후 현재 설치 버전 또는 업무용 앱 분류가 변경되어 승인할 수 없습니다."
+        return "설치 버전이나 업무용 분류가 바뀌어 승인할 수 없습니다."
     if message == "exact software approval already exists":
-        return "현재 유효한 사용 승인이 이미 있어 승인할 수 없습니다."
+        return "유효한 승인이 이미 있습니다."
     if message in {"batch child host scope changed", "batch approval scope changed"}:
-        return "요청 항목의 호스트 범위가 변경되어 처리할 수 없습니다."
-    return "요청이 다른 사용자에 의해 변경되었습니다. 최신 이력을 다시 불러오세요."
+        return "요청 항목의 호스트 범위가 바뀌어 처리할 수 없습니다."
+    return "요청이 변경되었습니다. 새로고침 후 다시 시도하세요."
 
 
 def _timestamp(value: str | None, label: str, *, future_after: str | None = None) -> str:
@@ -359,18 +359,17 @@ def build_router(repo: InventoryRepository, accounts: Accounts, require_read: Ca
                 request_id = repo.create_software_request({
                     "requester_id": actor["user_id"], "source": body.source, "name": body.name,
                     "arch": body.arch, "product_name": classification["product_name"] or body.name,
-                    "version": body.version, "purpose": body.purpose,
-                    "license_evidence": body.license_evidence, "assignee_id": None,
+                    "version": body.version, "purpose": body.purpose, "assignee_id": None,
                     "due_at": None, "approval_until": None, "decision_reason": "",
                 }, body.host_ids, actor["user_id"], at)
                 return repo.get_software_request(request_id)
         except ConflictError as exc:
             kind = str(exc)
             if kind == "overlapping request":
-                raise HTTPException(409, {"kind": "duplicate_request"}) from None
+                raise HTTPException(409, "같은 제품에 진행 중인 요청이 있습니다.") from None
             if kind == "already approved":
-                raise HTTPException(409, {"kind": "already_approved"}) from None
-            raise HTTPException(409, "요청이 동시에 변경되었습니다.") from None
+                raise HTTPException(409, "유효한 승인이 이미 있습니다.") from None
+            raise HTTPException(409, "요청이 변경되었습니다. 새로고침 후 다시 시도하세요.") from None
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
 
@@ -394,18 +393,18 @@ def build_router(repo: InventoryRepository, accounts: Accounts, require_read: Ca
                                                            item["version"], [body.host_id]):
                         raise HTTPException(422, "선택한 호스트에 지정 버전이 설치되어 있어야 합니다.")
                 batch_id = repo.create_software_request_batch({"host_id": body.host_id,
-                    "purpose": body.purpose, "license_evidence": body.license_evidence},
+                    "purpose": body.purpose},
                     items, actor["user_id"], at)
             batch = repo.get_software_request_batch(batch_id, at)
             if batch is None:
-                raise HTTPException(500, "요청 묶음을 만들지 못했습니다.")
+                raise HTTPException(500, "승인 요청을 만들지 못했습니다.")
             return enrich_batch(batch)
         except ConflictError as exc:
             if str(exc) == "overlapping request":
-                raise HTTPException(409, "선택한 소프트웨어 중 진행 중인 승인 요청이 있습니다.") from None
+                raise HTTPException(409, "선택한 제품 중 진행 중인 요청이 있습니다.") from None
             if str(exc) == "already approved":
-                raise HTTPException(409, "선택한 소프트웨어 중 현재 유효한 사용 승인이 있습니다.") from None
-            raise HTTPException(409, "요청이 동시에 변경되었습니다.") from None
+                raise HTTPException(409, "선택한 제품 중 유효한 승인이 있습니다.") from None
+            raise HTTPException(409, "요청이 변경되었습니다. 새로고침 후 다시 시도하세요.") from None
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
 
@@ -420,7 +419,7 @@ def build_router(repo: InventoryRepository, accounts: Accounts, require_read: Ca
         if role == "read":
             raise HTTPException(403, "요청 권한 또는 관리자 권한이 필요합니다.")
         if scope not in {"pending", "all", "assigned", "overdue"}:
-            raise HTTPException(422, "요청 범위를 확인하세요.")
+            raise HTTPException(422, "조회 범위를 확인하세요.")
         if scope == "assigned" and role != "admin":
             raise HTTPException(403, "관리자 담당자 범위는 관리자만 조회할 수 있습니다.")
         if status is not None and status not in _STATUSES:
@@ -454,11 +453,11 @@ def build_router(repo: InventoryRepository, accounts: Accounts, require_read: Ca
             raise HTTPException(403, "요청 권한 또는 관리자 권한이 필요합니다.")
         batch = repo.get_software_request_batch(batch_id, normalize_ts(clock()))
         if batch is None:
-            raise HTTPException(404, "요청 묶음을 찾을 수 없습니다.")
+            raise HTTPException(404, "승인 요청을 찾을 수 없습니다.")
         if role == "request":
             actor = _actor(accounts, authorization, "request")
             if batch["requester_id"] != actor["user_id"]:
-                raise HTTPException(404, "요청 묶음을 찾을 수 없습니다.")
+                raise HTTPException(404, "승인 요청을 찾을 수 없습니다.")
         now = normalize_ts(clock())
         for item in batch["items"]:
             for approval in item["approvals"]:
@@ -486,7 +485,7 @@ def build_router(repo: InventoryRepository, accounts: Accounts, require_read: Ca
                     _apply_batch_action(repo, batch_id, body, actor["user_id"], role, now)
             result = repo.get_software_request_batch(batch_id, now)
             if result is None:
-                raise HTTPException(404, "요청 묶음을 찾을 수 없습니다.")
+                raise HTTPException(404, "승인 요청을 찾을 수 없습니다.")
             for item in result["items"]:
                 for approval in item["approvals"]:
                     approval["effective_state"] = ("revoked" if approval["state"] == "revoked" else
@@ -495,7 +494,7 @@ def build_router(repo: InventoryRepository, accounts: Accounts, require_read: Ca
         except ConflictError as exc:
             raise HTTPException(409, _conflict_message(exc)) from None
         except KeyError:
-            raise HTTPException(404, "요청 묶음을 찾을 수 없습니다.") from None
+            raise HTTPException(404, "승인 요청을 찾을 수 없습니다.") from None
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
 
@@ -516,7 +515,7 @@ def build_router(repo: InventoryRepository, accounts: Accounts, require_read: Ca
         if scope == "pending":
             pending = True
         if pending and status is not None:
-            raise HTTPException(422, "pending 범위와 단일 상태 필터는 함께 사용할 수 없습니다.")
+            raise HTTPException(422, "대기 범위와 개별 상태는 함께 선택할 수 없습니다.")
         if status is not None and status not in _STATUSES:
             raise HTTPException(422, "요청 상태를 확인하세요.")
         if sort is not None and sort not in _REQUEST_SORTS:
@@ -595,10 +594,10 @@ def _prepare_action(repo: InventoryRepository, request_id: int, item: dict, body
 
     if action == "assign":
         if status not in {"submitted", "reviewing", "needs_changes"} or not body.assignee_id:
-            raise HTTPException(409, "검토가 진행 중인 요청과 담당자를 선택하세요.")
+            raise HTTPException(409, "처리 가능한 요청과 담당자를 선택하세요.")
         assignee = repo.get_user(body.assignee_id)
         if not assignee or not assignee["active"] or assignee["role"] != "admin":
-            raise HTTPException(422, "활성 관리자 담당자를 선택하세요.")
+            raise HTTPException(422, "활성 관리자 계정을 선택하세요.")
         due = _timestamp(body.due_at, "처리 기한", future_after=now)
         values.update(status="reviewing", assignee_id=body.assignee_id, due_at=due)
         detail.update(assignee_id=body.assignee_id, due_at=due)
@@ -607,11 +606,10 @@ def _prepare_action(repo: InventoryRepository, request_id: int, item: dict, body
             raise HTTPException(409, "접수 또는 검토 중인 요청에 보완 사유를 입력하세요.")
         values.update(status="needs_changes", decision_reason=reason)
     elif action == "resubmit":
-        if role != "request" or status != "needs_changes" or not body.purpose or not body.license_evidence:
-            raise HTTPException(409, "보완 요청된 본인 요청에 목적과 사용권 근거를 다시 입력하세요.")
-        values.update(status="submitted", purpose=body.purpose, license_evidence=body.license_evidence,
-                      decision_reason="")
-        detail.update(purpose=body.purpose, license_evidence=body.license_evidence)
+        if role != "request" or status != "needs_changes" or not body.purpose:
+            raise HTTPException(409, "보완 요청된 본인 요청에 요청 사유를 입력하세요.")
+        values.update(status="submitted", purpose=body.purpose, decision_reason="")
+        detail.update(purpose=body.purpose)
     elif action == "approve":
         if status != "reviewing" or not reason:
             raise HTTPException(409, "검토 중인 요청에 승인 사유를 입력하세요.")
@@ -634,7 +632,7 @@ def _prepare_action(repo: InventoryRepository, request_id: int, item: dict, body
             raise HTTPException(409, "승인된 요청에 취소 사유를 입력하세요.")
         if not any(a["state"] == "active" and a["valid_from"] <= now and a["valid_until"] >= now
                    and a["ended_at"] is None for a in item["approvals"]):
-            raise HTTPException(409, "현재 유효한 승인 범위가 없습니다.")
+            raise HTTPException(409, "현재 유효한 승인이 없습니다.")
         values.update(decision_reason=reason)
         revoke = True
     else:
@@ -651,7 +649,7 @@ def _apply_action(repo: InventoryRepository, request_id: int, body: RequestActio
     if item is None:
         raise HTTPException(404, "요청을 찾을 수 없습니다.")
     if item["revision"] != body.expected_revision:
-        raise HTTPException(409, "요청이 다른 사용자에 의해 변경되었습니다. 최신 이력을 다시 불러오세요.")
+        raise HTTPException(409, "요청이 변경되었습니다. 새로고침 후 다시 시도하세요.")
     if role == "request" and item["requester_id"] != actor_id:
         raise HTTPException(404, "요청을 찾을 수 없습니다.")
     plan = _prepare_action(repo, request_id, item, body, body.expected_revision, actor_id, role, now)
@@ -672,17 +670,17 @@ def _apply_batch_action(repo: InventoryRepository, batch_id: int, body: BatchAct
                         actor_id: str, role: str, now: str) -> None:
     batch = repo.get_software_request_batch(batch_id, now)
     if batch is None:
-        raise HTTPException(404, "요청 묶음을 찾을 수 없습니다.")
+        raise HTTPException(404, "승인 요청을 찾을 수 없습니다.")
     if role == "request" and batch["requester_id"] != actor_id:
-        raise HTTPException(404, "요청 묶음을 찾을 수 없습니다.")
+        raise HTTPException(404, "승인 요청을 찾을 수 없습니다.")
     children = {item["id"]: item for item in batch["items"]}
     plans = []
     for selected in body.items:
         item = children.get(selected.request_id)
         if item is None:
-            raise HTTPException(404, "묶음에 포함된 요청 항목을 찾을 수 없습니다.")
+            raise HTTPException(404, "승인 요청에 포함된 항목을 찾을 수 없습니다.")
         if item["revision"] != selected.expected_revision:
-            raise HTTPException(409, "요청이 다른 사용자에 의해 변경되었습니다. 최신 이력을 다시 불러오세요.")
+            raise HTTPException(409, "요청이 변경되었습니다. 새로고침 후 다시 시도하세요.")
         if role == "request" and item["requester_id"] != actor_id:
             raise HTTPException(404, "요청 항목을 찾을 수 없습니다.")
         plans.append(_prepare_action(repo, selected.request_id, item, body, selected.expected_revision,

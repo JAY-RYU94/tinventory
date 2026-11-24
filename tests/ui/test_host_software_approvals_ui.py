@@ -131,7 +131,6 @@ def host_batch_site(tmp_path):
                 {"source": "dpkg", "name": "approved-demo", "arch": "amd64", "version": "3.0.0"},
             ],
             "purpose": "비활성 선택 행을 검증하기 위한 격리 테스트 요청입니다.",
-            "license_evidence": "테스트 전용 가상 사용권 계약입니다.",
         })
         assert seeded_batch.status_code == 201, seeded_batch.text
         seeded_items = {item["name"]: item for item in seeded_batch.json()["items"]}
@@ -246,7 +245,6 @@ def test_batch_queue_api_is_available_to_requester(host_batch_site):
                 {"source": "dpkg", "name": "inventory-agent", "arch": "amd64", "version": "4.5.6"},
             ],
             "purpose": "호스트 관리 업무를 위해 두 제품이 필요합니다.",
-            "license_evidence": "격리 UI fixture에서 승인 가능한 사용권을 준비했습니다.",
         })
         assert created.status_code == 201, created.text
         detail = created.json()
@@ -262,7 +260,6 @@ def test_batch_queue_api_is_available_to_requester(host_batch_site):
             "host_id": host_batch_site["outside_host_id"],
             "items": [{"source": "dpkg", "name": "corp-tool", "arch": "amd64", "version": "1.2.3"}],
             "purpose": "범위 밖 호스트로 요청이 우회되지 않는지 검증합니다.",
-            "license_evidence": "테스트 전용 가상 사용권입니다.",
         })
         assert outside.status_code == 403, outside.text
 
@@ -289,7 +286,6 @@ def test_batch_admin_decisions_approve_only_the_selected_product_on_its_host(hos
                 {"source": "dpkg", "name": "inventory-agent", "arch": "amd64", "version": "4.5.6"},
             ],
             "purpose": "호스트의 두 업무 앱을 사용해야 하는 사유입니다.",
-            "license_evidence": "격리 테스트용 사용권 근거 문서입니다.",
         })
         assert created.status_code == 201, created.text
         batch = created.json()
@@ -385,14 +381,14 @@ def test_host_batch_software_selection_and_review_flow_in_chrome(host_batch_serv
             # 검색 필터가 선택 항목 하나를 숨겨도 기존 선택과 카운터가 유지된다.
             search = page.get_by_role("searchbox", name="설치된 소프트웨어 검색", exact=True)
             search.fill("corp-tool")
-            expect(page.locator(".batch-selection-count")).to_contain_text("선택 2개 · 현재 필터에서 숨김 1개")
+            expect(page.locator(".batch-selection-count")).to_contain_text("선택 2개 · 필터로 숨긴 항목 1개")
             expect(page.locator(".batch-selection-checkbox:checked")).to_have_count(1)
             search.fill("")
             expect(page.locator(".batch-selection-checkbox:checked")).to_have_count(2)
 
             # 현재 표시 항목 선택은 자격을 갖춘 두 업무 앱만 선택한다.
             page.get_by_role("button", name="선택 해제", exact=True).click()
-            page.get_by_role("button", name="현재 표시 가능한 항목 선택", exact=True).click()
+            page.get_by_role("button", name="현재 화면에 보이는 항목 선택", exact=True).click()
             expect(page.locator(".batch-selection-checkbox:checked")).to_have_count(2)
             keys = {
                 tuple(json.loads(value))
@@ -411,7 +407,7 @@ def test_host_batch_software_selection_and_review_flow_in_chrome(host_batch_serv
             page.goto(f"{host_batch_server['base']}/#/hosts/{host_batch_server['host_id']}?section=software")
             expect(page.locator(".batch-selection-count")).to_contain_text("선택 0개")
             expect(page.locator(".batch-selection-checkbox:checked")).to_have_count(0)
-            page.get_by_role("button", name="현재 표시 가능한 항목 선택", exact=True).click()
+            page.get_by_role("button", name="현재 화면에 보이는 항목 선택", exact=True).click()
             expect(page.locator(".batch-selection-checkbox:checked")).to_have_count(2)
             keys = {
                 tuple(json.loads(value))
@@ -436,25 +432,22 @@ def test_host_batch_software_selection_and_review_flow_in_chrome(host_batch_serv
             page.set_viewport_size({"width": 1440, "height": 900})
             page.wait_for_timeout(150)
 
-            page.get_by_role("button", name="선택한 SW 승인 요청", exact=True).click()
+            page.get_by_role("button", name="선택 항목 승인 요청", exact=True).click()
             dialog = page.locator("dialog.batch-request-dialog")
             expect(dialog).to_be_visible()
             expect(dialog.locator(".batch-request-summary li")).to_have_count(2)
             purpose = dialog.get_by_role("textbox", name="요청 사유", exact=True)
-            license_evidence = dialog.get_by_role("textbox", name="사용권 근거", exact=True)
             expect(purpose).to_be_visible()
             assert purpose.evaluate("node => node.matches(':invalid')")
             dialog.get_by_role("button", name="승인 요청 제출", exact=True).click()
             expect(dialog).to_be_visible()
             purpose.fill("배치 호스트에서 두 업무 앱을 운영 업무에 사용합니다.")
-            license_evidence.fill("가상 계약서 BATCH-UI-01을 확인했습니다.")
             page.screenshot(path=str(ARTIFACT_DIR / "product-v5-host-request.png"), animations="disabled")
             with page.expect_request(lambda request: request.method == "POST" and request.url.endswith("/v1/software-request-batches")) as request_info:
                 dialog.get_by_role("button", name="승인 요청 제출", exact=True).click()
             submitted = request_info.value.post_data_json
             assert submitted["host_id"] == host_batch_server["host_id"]
             assert submitted["purpose"] == "배치 호스트에서 두 업무 앱을 운영 업무에 사용합니다."
-            assert submitted["license_evidence"] == "가상 계약서 BATCH-UI-01을 확인했습니다."
             assert {tuple((row["source"], row["name"], row["arch"], row["version"])) for row in submitted["items"]} == keys
             expect(page).to_have_url(__import__("re").compile(r"#/sw-requests/batches/\d+"))
 
@@ -467,7 +460,7 @@ def test_host_batch_software_selection_and_review_flow_in_chrome(host_batch_serv
             assert all(item["host_ids"] == [host_batch_server["host_id"]] for item in detail["items"])
 
             # 요청자는 저장된 묶음에서 실제 요청 호스트 화면으로 돌아간다.
-            page.get_by_role("link", name="← 요청 묶음", exact=True).click()
+            page.get_by_role("link", name="← 승인 요청 목록", exact=True).click()
             expect(page).to_have_url(__import__("re").compile(r"#/hosts/" + host_batch_server["host_id"]))
             expect(page.locator(".batch-selection-checkbox:checked")).to_have_count(0)
 
@@ -476,7 +469,7 @@ def test_host_batch_software_selection_and_review_flow_in_chrome(host_batch_serv
             expect(page.get_by_role("heading", name="batch-ui-02.corp.example")).to_be_visible()
             expect(page.get_by_text("이 호스트는 요청 권한 범위에 없습니다.", exact=False)).to_be_visible()
             expect(page.locator(".batch-selection-checkbox")).to_have_count(0)
-            expect(page.get_by_role("button", name="선택한 SW 승인 요청", exact=True)).to_be_disabled()
+            expect(page.get_by_role("button", name="선택 항목 승인 요청", exact=True)).to_be_disabled()
             page.goto(f"{host_batch_server['base']}/#/hosts/{host_batch_server['unregistered_host_id']}?section=software")
             expect(page.get_by_role("heading", name="batch-ui-unregistered.corp.example")).to_be_visible()
             expect(page.locator(".batch-selection-checkbox:enabled")).to_have_count(2)
@@ -491,8 +484,8 @@ def test_host_batch_software_selection_and_review_flow_in_chrome(host_batch_serv
             admin_page.on("pageerror", lambda error: console_errors.append(str(error)))
             admin_page.goto(f"{host_batch_server['base']}/#/sw-requests")
             expect(admin_page.get_by_role("heading", name="호스트별 승인 요청")).to_be_visible()
-            status_filter = admin_page.get_by_label("요청 SW 상태 포함 필터", exact=True)
-            security_filter = admin_page.get_by_label("요청 SW 보안 판정 포함 필터", exact=True)
+            status_filter = admin_page.get_by_label("요청 상태 필터", exact=True)
+            security_filter = admin_page.get_by_label("보안 영향 필터", exact=True)
             status_filter.select_option("submitted")
             expect(admin_page).to_have_url(__import__("re").compile(r"status=submitted"))
             security_filter.select_option("confirmed")
@@ -505,7 +498,7 @@ def test_host_batch_software_selection_and_review_flow_in_chrome(host_batch_serv
             expect(admin_page).to_have_url(__import__("re").compile(r"sort=batch_no.*direction=asc"))
             queue_anchor.click()
             expect(admin_page.locator(".batch-detail-page")).to_be_visible()
-            back_to_queue = admin_page.get_by_role("link", name="← 요청 묶음", exact=True)
+            back_to_queue = admin_page.get_by_role("link", name="← 승인 요청 목록", exact=True)
             back_to_queue.click()
             expect(admin_page).to_have_url(__import__("re").compile(r"#/sw-requests.*status=submitted.*security_impact=confirmed.*sort=batch_no"))
             expect(admin_page.locator(".batch-queue-table tbody tr")).to_have_count(1)
@@ -554,7 +547,7 @@ def test_host_batch_software_selection_and_review_flow_in_chrome(host_batch_serv
             assert all(item["assignee_id"] == host_batch_server["admin_user_id"] for item in assigned["items"])
             assert all(item["due_at"] for item in assigned["items"])
 
-            # 보완 요청을 거쳐 요청자 화면에서 사유·사용권 근거를 고친 뒤 다시 제출한다.
+            # 보완 요청을 거쳐 요청자 화면에서 업무 사유를 고친 뒤 다시 제출한다.
             admin_page.get_by_role("button", name="Corp Tool 보완 요청", exact=True).click()
             changes_dialog = admin_page.locator("dialog.batch-action-dialog")
             changes_dialog.get_by_label("보완 사유", exact=True).fill("사용 목적과 대상 업무를 구체화해 주세요.")
@@ -579,9 +572,7 @@ def test_host_batch_software_selection_and_review_flow_in_chrome(host_batch_serv
             requester_page.get_by_role("button", name="Corp Tool 보완 후 재제출", exact=True).click()
             resubmit_dialog = requester_page.locator("dialog.batch-action-dialog")
             purpose_box = resubmit_dialog.get_by_label("요청 사유", exact=True)
-            license_box = resubmit_dialog.get_by_label("사용권 근거", exact=True)
             purpose_box.fill("업무 배포 작업을 위해 Corp Tool을 호스트에 설치해 운영합니다.")
-            license_box.fill("가상 계약 BATCH-UI-01에 명시된 내부 업무 사용권을 확인했습니다.")
             with requester_page.expect_response(lambda response: response.request.method == "POST"
                     and response.url.endswith(f"/v1/software-request-batches/{batch_id}/actions")) as resubmit_response:
                 resubmit_dialog.get_by_role("button", name="보완 후 재제출", exact=True).click()
@@ -593,7 +584,6 @@ def test_host_batch_software_selection_and_review_flow_in_chrome(host_batch_serv
             resubmitted_child = next(item for item in resubmitted["items"] if item["name"] == "corp-tool")
             assert resubmitted_child["status"] == "submitted"
             assert resubmitted_child["purpose"] == "업무 배포 작업을 위해 Corp Tool을 호스트에 설치해 운영합니다."
-            assert resubmitted_child["license_evidence"] == "가상 계약 BATCH-UI-01에 명시된 내부 업무 사용권을 확인했습니다."
 
             # 보완 후 재제출은 검토자가 다시 배정해야 한다.
             admin_page.goto(f"{host_batch_server['base']}/#/sw-requests/batches/{batch_id}")
@@ -611,7 +601,7 @@ def test_host_batch_software_selection_and_review_flow_in_chrome(host_batch_serv
             # 상세 행의 단건 판정 버튼과 사유/유효기한 폼을 사용해 서로 다른 결론을 남긴다.
             admin_page.get_by_role("button", name="Corp Tool 승인", exact=True).click()
             approve_dialog = admin_page.locator("dialog.batch-action-dialog")
-            approve_dialog.get_by_label("승인 사유", exact=True).fill("업무 필요와 사용권 근거를 확인했습니다.\n보안 검토도 마쳤습니다.")
+            approve_dialog.get_by_label("승인 사유", exact=True).fill("업무 필요와 보안 검토를 확인했습니다.\n호스트별 사용 범위를 기록했습니다.")
             approve_dialog.get_by_label("승인 유효 기한", exact=True).fill("2026-12-23T12:00")
             with admin_page.expect_response(lambda response: response.request.method == "POST"
                     and response.url.endswith(f"/v1/software-request-batches/{batch_id}/actions")) as approve_response:

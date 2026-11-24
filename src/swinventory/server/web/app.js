@@ -2245,7 +2245,7 @@
     h, table, link, compactTime: compactKstTime,
     requestLabel: workflowRequestLabel, impactLabel: workflowImpactLabel,
   });
-  if (!batchModule) throw new Error("승인 묶음 표 모듈을 불러오지 못했습니다.");
+  if (!batchModule) throw new Error("승인 요청 표를 불러오지 못했습니다.");
 
   const softwareTupleKey = (row) => JSON.stringify([row.source || "", row.name || "", row.arch || "", row.version || ""]);
   async function softwareSelectionController(hostId, host) {
@@ -2269,13 +2269,13 @@
     let limitMessage = "";
     const count = h("span", { class: "batch-selection-count", role: "status", "aria-live": "polite" });
     const limit = h("span", { class: "batch-selection-limit", role: "alert" });
-    const selectVisible = h("button", { type: "button", "data-batch-select-visible": "", disabled: !allowed }, "현재 표시 가능한 항목 선택");
+    const selectVisible = h("button", { type: "button", "data-batch-select-visible": "", disabled: !allowed }, "현재 화면에 보이는 항목 선택");
     const clearSelection = h("button", { type: "button", "data-batch-clear": "", disabled: true }, "선택 해제");
-    const openRequest = h("button", { type: "button", class: "primary", "data-batch-open-request": "", disabled: true }, "선택한 SW 승인 요청");
+    const openRequest = h("button", { type: "button", class: "primary", "data-batch-open-request": "", disabled: true }, "선택 항목 승인 요청");
     const updateBar = () => {
       const visibleKeys = new Set(currentVisible.map(softwareTupleKey));
       const hiddenCount = [...selected.keys()].filter((key) => !visibleKeys.has(key)).length;
-      count.textContent = `선택 ${selected.size}개 · 현재 필터에서 숨김 ${hiddenCount}개 · 최대 100개`;
+      count.textContent = `선택 ${selected.size}개 · 필터로 숨긴 항목 ${hiddenCount}개 · 한 번에 최대 100개`;
       limit.textContent = limitMessage;
       clearSelection.disabled = !allowed || selected.size === 0;
       openRequest.disabled = !allowed || selected.size === 0;
@@ -2302,7 +2302,7 @@
       if (!String(row.version || "").trim()) return "설치 버전이 확인된 항목만 요청할 수 있습니다.";
       if (row.approval_status === "active") return "현재 유효한 승인이 있습니다.";
       if (isOwnPending(row)) return "진행 중인 본인 요청을 상세에서 보완·철회할 수 있습니다.";
-      if (selected.size >= 100 && !selected.has(softwareTupleKey(row))) return "한 묶음은 최대 100개까지 요청할 수 있습니다.";
+      if (selected.size >= 100 && !selected.has(softwareTupleKey(row))) return "한 번에 최대 100개까지 요청할 수 있습니다.";
       return "현재 승인 상태를 확인할 수 없습니다.";
     }
     const updateRenderedSelection = () => {
@@ -2333,7 +2333,7 @@
     selectVisible.addEventListener("click", () => {
       const candidates = currentVisible.filter((row) => canSelect(row) && !selected.has(softwareTupleKey(row)));
       if (selected.size + candidates.length > 100) {
-        limitMessage = `현재 표시 항목을 모두 선택하면 100개를 넘습니다. ${selected.size}개가 이미 선택되어 있습니다. 필터를 좁히거나 개별 선택하세요.`;
+        limitMessage = `현재 화면의 항목을 모두 선택하면 100개를 넘습니다. 이미 ${selected.size}개를 선택했습니다. 필터를 좁히거나 개별 선택하세요.`;
         updateBar(); return;
       }
       candidates.forEach((row) => { const key = softwareTupleKey(row); selected.set(key, row); selectedKeys.add(key); });
@@ -2347,7 +2347,6 @@
       const opener = event.currentTarget;
       const items = [...selected.values()];
       const purpose = h("textarea", { "aria-label": "요청 사유", name: "purpose", required: true, minlength: 5, maxlength: 2000, rows: 4, autocomplete: "off", placeholder: "업무에서 선택한 소프트웨어가 필요한 이유를 입력하세요…" });
-      const license = h("textarea", { "aria-label": "사용권 근거", name: "license_evidence", required: true, minlength: 3, maxlength: 2000, rows: 4, autocomplete: "off", placeholder: "계약·구독·라이선스 확인 근거를 입력하세요…" });
       const msg = msgBox(); let dialog;
       const submit = h("button", { type: "submit", class: "primary", "data-batch-submit": "" }, "승인 요청 제출");
       const list = h("ul", { class: "batch-request-summary" }, items.map((row) => h("li", null,
@@ -2356,14 +2355,14 @@
       const form = h("form", { class: "form batch-request-form", onsubmit: async (submitEvent) => {
         submitEvent.preventDefault();
         if (selected.size !== items.length || items.some((row) => !canSelect(row))) {
-          msg.err("선택한 설치 상태가 바뀌었습니다. 호스트 소프트웨어 표를 새로고침한 뒤 다시 선택하세요."); return;
+          msg.err("설치 상태가 바뀌었습니다. 호스트의 소프트웨어 목록을 새로고침한 뒤 다시 선택하세요."); return;
         }
         submit.disabled = true; msg.clear();
         try {
           const result = await api("/v1/software-request-batches", { method: "POST", body: JSON.stringify({
             host_id: hostId,
             items: items.map((row) => ({ source: row.source, name: row.name, arch: row.arch || "", version: row.version })),
-            purpose: purpose.value.trim(), license_evidence: license.value.trim(),
+            purpose: purpose.value.trim(),
           }) });
           dialog.close("saved");
           location.hash = `#/sw-requests/batches/${enc(result.id)}?return=${enc(currentReturn())}`;
@@ -2374,9 +2373,8 @@
         }
       } },
         h("div", { class: "batch-request-host" }, h("strong", null, host.hostname || hostId), ` · ${host.asset_no || "자산 미등록"}`),
-        h("div", { class: "full" }, h("p", null, `선택 ${items.length}개 · 이 호스트 한 대에 묶어서 요청합니다.`), list),
+        h("div", { class: "full" }, h("p", null, `이 호스트에서 선택한 소프트웨어 ${items.length}개를 한 번에 요청합니다.`), list),
         field("요청 사유", purpose, "선택한 소프트웨어에 공통으로 적용됩니다."),
-        field("사용권 근거", license, "선택한 소프트웨어에 공통으로 적용됩니다."),
         h("p", { class: "hint full" }, "OS 패키지와 개발 의존성은 요청 대상에서 제외됩니다. CVE 영향 정보는 별도로 표시되며 요청 선택을 제한하지 않습니다."),
         h("div", { class: "full" }, msg.el),
         h("div", { class: "dialog-actions full" }, cancelDialog(() => dialog.close()), submit));
@@ -2507,7 +2505,7 @@
           alert("요청 범위에 이 제품이 설치된 호스트가 없습니다. 관리자가 호스트 범위를 지정했는지 확인하세요."); return;
         }
         const dialogContent = h("div", { class: "host-request-chooser" },
-          h("p", null, `${product.product_name || product.name} 사용 승인은 한 호스트에 설치된 앱을 묶어 요청합니다. 대상 호스트를 열고 버전별 항목을 선택하세요.`),
+          h("p", null, `${product.product_name || product.name}의 승인 요청은 호스트 한 대씩 제출합니다. 대상 호스트를 열고 설치 버전을 선택하세요.`),
           h("ul", { class: "host-request-choice-list" }, choices),
           h("div", { class: "dialog-actions" }, cancelDialog(() => dialog.close())));
         let dialog; dialog = editorDialog("호스트별 사용 승인 요청", dialogContent, opener);
@@ -2522,8 +2520,8 @@
   }
 
   async function viewSoftwareRequests(rest, q, alive) {
-    if (role !== "admin" && role !== "request") return h("div", null, pageHeader("SW 사용 승인"), h("div", { class: "panel" }, "조회 전용 계정에는 승인 요청 권한이 없습니다."));
-    if (role === "request" && authKind !== "session") return h("div", null, pageHeader("SW 사용 승인"), h("div", { class: "panel" }, "요청자는 개인 세션으로 로그인해야 요청·상세·상태 변경을 할 수 있습니다."));
+    if (role !== "admin" && role !== "request") return h("div", null, pageHeader("SW 사용 승인"), h("div", { class: "panel" }, "이 계정에는 승인 요청 권한이 없습니다."));
+    if (role === "request" && authKind !== "session") return h("div", null, pageHeader("SW 사용 승인"), h("div", { class: "panel" }, "승인 요청을 제출하거나 상태를 확인하려면 개인 계정으로 로그인하세요."));
     if (rest[0] === "batches") return rest[1] ? softwareRequestBatchDetail(rest[1], q, alive) : viewSoftwareRequestBatches(q, alive);
     if (rest[0]) return softwareRequestDetail(Number(rest[0]), q, alive);
     return viewSoftwareRequestBatches(q, alive);
@@ -2544,12 +2542,12 @@
     if (st.scope === "pending" && st.status) st.scope = "all";
     const body = h("div"); let result = { items: [], total: 0 }; let seq = 0; let scopes = null;
     const hostContext = h("div", { class: "batch-host-filter" });
-    const search = h("input", { type: "search", "aria-label": "요청 묶음 검색", placeholder: "호스트명·제품·요청자·요청 번호", value: st.q });
-    const status = h("select", { "aria-label": "요청 SW 상태 포함 필터" },
+    const search = h("input", { type: "search", "aria-label": "승인 요청 검색", placeholder: "호스트명·제품·요청자·요청 번호", value: st.q });
+    const status = h("select", { "aria-label": "요청 상태 필터" },
       [["", "모든 상태"], ...Object.entries(REQUEST_STATUS).map(([value, [label]]) => [value, label])]
         .map(([value, label]) => h("option", { value, selected: value === st.status }, label)));
-    const security = h("select", { "aria-label": "요청 SW 보안 판정 포함 필터" },
-      [["", "모든 보안 판정"], ...Object.entries(IMPACT_STATUS).map(([value, [label]]) => [value, label])]
+    const security = h("select", { "aria-label": "보안 영향 필터" },
+      [["", "모든 보안 영향"], ...Object.entries(IMPACT_STATUS).map(([value, [label]]) => [value, label])]
         .map(([value, label]) => h("option", { value, selected: value === st.security }, label)));
     const resultCount = h("span", { class: "table-toolbar-result", role: "status", "aria-live": "polite" }, "불러오는 중…");
     const queryState = () => ({
@@ -2593,7 +2591,7 @@
       if (st.status) params.set("status", st.status);
       if (st.security) params.set("security_impact", st.security);
       if (st.sort) { params.set("sort", st.sort); params.set("direction", st.direction); }
-      clear(body).append(h("p", { class: "muted", role: "status" }, "요청 묶음을 불러오는 중…"));
+      clear(body).append(h("p", { class: "muted", role: "status" }, "승인 요청을 불러오는 중…"));
       try {
         result = await api(`/v1/software-request-batches?${params}`);
         if (!alive() || run !== seq) return;
@@ -2632,11 +2630,11 @@
     await Promise.all([refresh(), loadHostContext()]);
     return h("div", { class: "workflow-page batch-queue-page" },
       pageHeader("호스트별 승인 요청"), scopes, hostContext, filters,
-      h("p", { class: "table-note" }, "상태·보안 판정 필터는 묶음 안 하나 이상의 소프트웨어 요청이 조건에 맞으면 표시합니다."), body);
+      h("p", { class: "table-note" }, "상태·보안 필터는 요청한 소프트웨어 중 하나라도 조건에 맞으면 해당 요청을 표시합니다."), body);
   }
 
   async function softwareRequestBatchDetail(batchId, q, alive) {
-    if (!/^[1-9][0-9]*$/.test(String(batchId))) throw new ApiError(404, "요청 묶음을 찾을 수 없습니다.");
+    if (!/^[1-9][0-9]*$/.test(String(batchId))) throw new ApiError(404, "승인 요청을 찾을 수 없습니다.");
     const detailPath = `#/sw-requests/batches/${enc(batchId)}`;
     const batchRouteHash = location.hash || detailPath;
     const back = returnHash(q) || "#/sw-requests";
@@ -2683,6 +2681,15 @@
       assign: "담당 배정", request_changes: "보완 요청", approve: "승인", reject: "반려",
       withdraw: "요청 철회", resubmit: "보완 후 재제출", revoke_approval: "승인 취소",
     };
+    const actionSuccessMessage = (action, count) => ({
+      assign: `요청 ${count}건의 담당자를 지정했습니다.`,
+      request_changes: `요청 ${count}건에 보완을 요청했습니다.`,
+      approve: `요청 ${count}건을 승인했습니다.`,
+      reject: `요청 ${count}건을 반려했습니다.`,
+      withdraw: `요청 ${count}건을 철회했습니다.`,
+      resubmit: `보완한 요청 ${count}건을 다시 제출했습니다.`,
+      revoke_approval: `요청 ${count}건의 승인을 취소했습니다.`,
+    })[action] || `요청 ${count}건을 처리했습니다.`;
     const actionButton = (item, action) => h("button", {
       type: "button", class: `batch-item-action${action === "reject" || action === "revoke_approval" ? " danger" : ""}`,
       "data-batch-action": action, "data-request-id": item.id,
@@ -2699,7 +2706,7 @@
         });
         batch = updated; selected.clear(); dialog.close("saved");
         if (alive()) render();
-        notice.ok(`${items.length}개 소프트웨어 요청에 ${actionLabels[action]} 처리를 적용했습니다.`);
+        notice.ok(actionSuccessMessage(action, items.length));
       } catch (error) {
         const messageText = error.status === 409
           ? `${error.message} 최신 상태를 다시 불러 확인하세요.`
@@ -2727,10 +2734,8 @@
       } else if (action === "resubmit") {
         const oneItem = items.length === 1;
         const purpose = h("textarea", { required: true, minlength: 5, maxlength: 2000, rows: 3, "aria-label": "요청 사유", value: (oneItem ? items[0].purpose : null) || batch.purpose || "" });
-        const license = h("textarea", { required: true, minlength: 3, maxlength: 2000, rows: 3, "aria-label": "사용권 근거", value: (oneItem ? items[0].license_evidence : null) || batch.license_evidence || "" });
-        fields.push(field("요청 사유", purpose, oneItem ? "이 항목의 보완된 사유를 확인·수정합니다." : "선택한 모든 항목에 공통으로 적용합니다."),
-          field("사용권 근거", license, oneItem ? "이 항목의 최신 사용권 근거를 확인·수정합니다." : "선택한 모든 항목에 공통으로 적용합니다."));
-        payload.purpose = () => purpose.value.trim(); payload.license_evidence = () => license.value.trim();
+        fields.push(field("요청 사유", purpose, oneItem ? "이 요청의 보완 내용을 확인하고 사유를 수정하세요." : "선택한 요청 모두에 같은 사유가 적용됩니다."));
+        payload.purpose = () => purpose.value.trim();
       } else {
         const reason = h("textarea", { required: action !== "withdraw", maxlength: 2000, rows: 3,
           "aria-label": reasonLabel, placeholder: `${reasonLabel}를 구체적으로 입력하세요.` });
@@ -2754,7 +2759,7 @@
       selected,
       canSelect: (item) => actionsFor(item).length > 0,
       disabledReason: (item) => item.status === "reviewing" && item.current_installed !== true
-        ? "현재 호스트에 정확히 설치된 버전을 확인한 뒤 승인할 수 있습니다."
+        ? "승인하려면 이 호스트에 해당 버전이 설치되어 있어야 합니다."
         : item.status === "approved" && !adminActions(item).includes("revoke_approval")
           ? "이 요청 항목에 현재 유효한 승인 기록이 없어 취소할 수 없습니다."
           : "현재 권한이나 요청 상태에서 처리할 작업이 없습니다.",
@@ -2766,7 +2771,7 @@
     const bulkActions = ["assign", "request_changes", "approve", "reject", "withdraw", "resubmit", "revoke_approval"];
     const bulkBar = h("div", { class: "batch-bulk-toolbar", hidden: true });
     const selectionCount = h("span", { class: "batch-selection-count", role: "status", "aria-live": "polite" }, "선택 0개");
-    const selectAll = h("button", { type: "button", "data-batch-select-all": "" }, "처리 가능한 항목 전체 선택");
+    const selectAll = h("button", { type: "button", "data-batch-select-all": "" }, "현재 처리할 수 있는 요청 모두 선택");
     const clearSelected = h("button", { type: "button", "data-batch-clear-selection": "", disabled: true }, "선택 해제");
     const selectionTools = h("div", { class: "batch-detail-selection-tools" }, selectionCount, selectAll, clearSelected);
     selectAll.addEventListener("click", () => {
@@ -2792,7 +2797,7 @@
           "data-batch-action": action, "data-bulk": "true", disabled: !eligible,
           title: eligible ? "" : "선택한 모든 요청의 현재 상태에서 사용할 수 있는 처리만 일괄 적용할 수 있습니다.",
           onclick: (event) => openAction(action, items, event.currentTarget),
-        }, `선택 항목 ${actionLabels[action]}`);
+        }, `선택한 요청 ${actionLabels[action]}`);
         bulkBar.append(button);
       }
       bulkBar.append(h("button", { type: "button", class: "link", onclick: () => {
@@ -2808,10 +2813,10 @@
         h("div", null,
           h("strong", null, link(hostHeading, `#/hosts/${enc(batch.host_id)}?section=software`)),
           h("span", { class: "batch-detail-meta" }, `${host.asset_no ? `자산 ${host.asset_no} · ` : ""}${batch.requester_name || "요청자 미상"} · ${compactKstTime(batch.created_at).textContent}`)),
-        h("div", { class: "batch-detail-status" }, h("strong", null, statusNode), h("span", { class: "batch-detail-meta" }, `${batch.item_count || items.length}개 SW · ${batch.batch_no || `묶음 ${batch.id}`}`)));
+        h("div", { class: "batch-detail-status" }, h("strong", null, statusNode), h("span", { class: "batch-detail-meta" }, `소프트웨어 ${batch.item_count || items.length}개 · ${batch.batch_no || `요청 ${batch.id}`}`)));
       const tableRows = batchModule.itemTable(items, {
         selection, actionsFor: (item) => actionsFor(item).map((action) => actionButton(item, action)),
-        commonPurpose: batch.purpose, commonLicense: batch.license_evidence,
+        commonPurpose: batch.purpose,
         childHref: (item) => `${detailPathOfChild(item.id)}`,
         cveHref: (item, cve) => hashOfExact(`#/cves/${enc(cve.cve_id)}`, {
           return: batchRouteHash, host: batch.host_id,
@@ -2820,13 +2825,11 @@
         }, ["product_arch", "product_version"]),
       });
       clear(root).append(
-        h("div", { class: "toolbar batch-detail-back" }, link("← 요청 묶음", back)),
-        pageHeader(batch.batch_no || `요청 묶음 ${batch.id}`, null, `${hostHeading}${host.asset_no ? ` · 자산 ${host.asset_no}` : ""}`),
+        h("div", { class: "toolbar batch-detail-back" }, link("← 승인 요청 목록", back)),
+        pageHeader(batch.batch_no || `요청 ${batch.id}`, null, `${hostHeading}${host.asset_no ? ` · 자산 ${host.asset_no}` : ""}`),
         header,
-        h("div", { class: "batch-detail-reasons" },
-          h("section", null, h("h2", null, "최초 공통 요청 사유"), h("p", null, batch.purpose || "기록 없음")),
-          h("section", null, h("h2", null, "최초 공통 사용권 근거"), h("p", null, batch.license_evidence || "기록 없음"))),
-        h("p", { class: "batch-security-summary" }, `보안 판정별 요청 항목: ${batchModule.securitySummary(batch)}`),
+        h("section", { class: "batch-detail-reasons" }, h("h2", null, "처음 제출한 요청 사유"), h("p", null, batch.purpose || "기록 없음")),
+        h("p", { class: "batch-security-summary" }, `요청한 소프트웨어의 보안 영향: ${batchModule.securitySummary(batch)}`),
         selectionTools, bulkBar, tableRows,
         h("details", { class: "batch-history-details" }, h("summary", null, "각 소프트웨어 요청의 처리 이력"),
           h("p", null, "요청 번호를 열면 해당 항목의 판정·승인·변경 이력을 확인할 수 있습니다.")),
@@ -2896,9 +2899,8 @@
       } }, "반려"));
       if (role === "request" && status === "needs_changes") actions.push(h("button", { type: "button", class: "primary", onclick: (e) => {
         const purpose = h("textarea", { required: true, minlength: 5, maxlength: 2000, rows: 3, value: item.purpose });
-        const license = h("textarea", { required: true, minlength: 3, maxlength: 2000, rows: 3, value: item.license_evidence });
-        actionForm("보완 후 재제출", "resubmit", [field("업무 목적", purpose), field("사용권 근거", license)],
-          () => ({ purpose: purpose.value.trim(), license_evidence: license.value.trim() }), e.currentTarget);
+        actionForm("보완 후 재제출", "resubmit", [field("요청 사유", purpose)],
+          () => ({ purpose: purpose.value.trim() }), e.currentTarget);
       } }, "같은 요청 번호로 재제출"));
       if (role === "request" && ["submitted", "reviewing", "needs_changes"].includes(status)) actions.push(h("button", { type: "button", onclick: (e) => {
         const reason = h("textarea", { maxlength: 2000, rows: 3, placeholder: "철회 사유(선택)" });
@@ -2908,14 +2910,14 @@
         const reason = reasonField("승인 취소 사유"); actionForm("승인 범위 취소", "revoke_approval", [field("취소 사유", reason)], () => ({ reason: reason.value.trim() }), e.currentTarget);
       } }, "현재 승인 취소"));
       return h("div", null,
-        pageHeader(item.request_no, h("a", { href: base, class: "button-link" }, "← 요청함"), `${productLabel("business_app")} · revision ${item.revision}`),
+        pageHeader(item.request_no, h("a", { href: base, class: "button-link" }, "← 요청함"), `${item.product_name || item.name} · ${item.version || "버전 미기록"}`),
         h("div", { class: "action-bar" }, requestBadge(status), ...actions),
         h("div", { class: "request-grid" },
           h("section", { class: "panel" }, h("h2", null, "요청 내용"),
             h("dl", { class: "detail-list" }, h("dt", null, "제품"), h("dd", null, link(item.product_name, `#/software/${enc(item.name)}`), ` · ${item.source} · ${item.arch}`),
               h("dt", null, "버전"), h("dd", null, item.version), h("dt", null, "요청자"), h("dd", null, item.requester_name),
               h("dt", null, "대상 호스트"), h("dd", null, item.hosts.map((host) => link(host.hostname, `#/hosts/${enc(host.host_id)}`))),
-              h("dt", null, "업무 목적"), h("dd", null, item.purpose), h("dt", null, "사용권 근거"), h("dd", null, item.license_evidence),
+              h("dt", null, "요청 사유"), h("dd", null, item.purpose),
               h("dt", null, "담당 / 처리 기한"), h("dd", null, `${item.assignee_name || "미배정"} · `, timeEl(item.due_at)),
               h("dt", null, "승인 유효 기한"), h("dd", null, timeEl(item.approval_until)),
               h("dt", null, "최근 판정 사유"), h("dd", null, item.decision_reason || "-"),
@@ -2934,7 +2936,6 @@
           { title: "작업", render: (e) => e.action },
           { title: "상태", render: (e) => `${e.from_status || "-"} → ${e.to_status}` },
           { title: "사유 / 세부 내용", render: (e) => h("span", null, e.reason || "-", h("details", null, h("summary", null, "세부 내용"), h("pre", { class: "json" }, JSON.stringify(e.detail, null, 2)))) },
-          { title: "revision", render: (e) => e.revision },
         ], item.history, "요청 이력이 없습니다.")));
     }
     clear(root).append(draw()); return root;
